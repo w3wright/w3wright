@@ -1032,13 +1032,24 @@ mod tests {
         };
         assert!(entry.flags.is_compressed());
         assert_eq!(entry.compression_method_bits(), 0);
-        assert_eq!(entry.compression_name(), "compressed(algorithm not declared)");
+        assert_eq!(
+            entry.compression_name(),
+            "compressed(algorithm not declared)"
+        );
     }
 
     #[test]
     fn hash_entry_empty_detection() {
-        assert!(HashEntry { block_index: HASH_ENTRY_EMPTY, ..Default::default() }.is_empty());
-        assert!(!HashEntry { block_index: 0, ..Default::default() }.is_empty());
+        assert!(HashEntry {
+            block_index: HASH_ENTRY_EMPTY,
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!HashEntry {
+            block_index: 0,
+            ..Default::default()
+        }
+        .is_empty());
     }
 
     #[test]
@@ -1068,7 +1079,10 @@ mod tests {
     #[test]
     fn known_member_names_cover_the_enumerated_formats() {
         for name in ["war3map.w3i", "war3map.w3e", "war3map.wts", "war3map.imp"] {
-            assert!(KNOWN_MEMBER_NAMES.contains(&name), "{name} should be in the list");
+            assert!(
+                KNOWN_MEMBER_NAMES.contains(&name),
+                "{name} should be in the list"
+            );
         }
     }
 

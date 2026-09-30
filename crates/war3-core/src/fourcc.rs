@@ -188,8 +188,14 @@ mod tests {
 
     #[test]
     fn display_falls_back_to_hex_when_not_printable() {
-        assert_eq!(FourCC::new([0x00, 0x01, 0xFF, 0x7F]).to_string(), "0x7FFF0100");
-        assert_eq!(FourCC::new([0xFF, 0x00, 0x00, 0x00]).to_string(), "0x000000FF");
+        assert_eq!(
+            FourCC::new([0x00, 0x01, 0xFF, 0x7F]).to_string(),
+            "0x7FFF0100"
+        );
+        assert_eq!(
+            FourCC::new([0xFF, 0x00, 0x00, 0x00]).to_string(),
+            "0x000000FF"
+        );
     }
 
     #[test]
@@ -207,7 +213,10 @@ mod tests {
     #[test]
     fn from_bytes_exact_rejects_wrong_length() {
         assert!(FourCC::from_bytes_exact(b"abc").is_err());
-        assert_eq!(FourCC::from_bytes_exact(b"abcd").unwrap(), FourCC::new(*b"abcd"));
+        assert_eq!(
+            FourCC::from_bytes_exact(b"abcd").unwrap(),
+            FourCC::new(*b"abcd")
+        );
     }
 
     #[test]

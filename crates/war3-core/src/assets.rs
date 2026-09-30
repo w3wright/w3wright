@@ -104,7 +104,8 @@ impl MemoryAssetSource {
 
     /// Inserts a file.
     pub fn insert(&mut self, path: impl AsRef<str>, bytes: impl Into<Vec<u8>>) {
-        self.files.insert(normalize_asset_path(path.as_ref()), bytes.into());
+        self.files
+            .insert(normalize_asset_path(path.as_ref()), bytes.into());
     }
 
     /// Builds a collection in one expression.
@@ -207,9 +208,18 @@ mod tests {
 
     #[test]
     fn normalize_is_case_insensitive_and_separator_agnostic() {
-        assert_eq!(normalize_asset_path("UI\\WorldEditStrings.txt"), "ui\\worldeditstrings.txt");
-        assert_eq!(normalize_asset_path("UI/WorldEditStrings.txt"), "ui\\worldeditstrings.txt");
-        assert_eq!(normalize_asset_path("\\UI\\\\TriggerData.txt"), "ui\\triggerdata.txt");
+        assert_eq!(
+            normalize_asset_path("UI\\WorldEditStrings.txt"),
+            "ui\\worldeditstrings.txt"
+        );
+        assert_eq!(
+            normalize_asset_path("UI/WorldEditStrings.txt"),
+            "ui\\worldeditstrings.txt"
+        );
+        assert_eq!(
+            normalize_asset_path("\\UI\\\\TriggerData.txt"),
+            "ui\\triggerdata.txt"
+        );
     }
 
     #[test]

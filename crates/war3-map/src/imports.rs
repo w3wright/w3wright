@@ -47,7 +47,10 @@ impl Import {
     /// Builds a record.
     #[must_use]
     pub fn new(path: impl Into<String>, flags: u32) -> Self {
-        Self { path: path.into(), flags: ImportFlags(flags) }
+        Self {
+            path: path.into(),
+            flags: ImportFlags(flags),
+        }
     }
 
     /// The paths to try for this record, in order.

@@ -206,7 +206,14 @@ impl Map {
         let mut metadata = metadata;
         resolve_metadata_strings(&mut metadata, &strings, &mut diagnostics);
 
-        Ok(Self { metadata, strings, imports, terrain, files, diagnostics })
+        Ok(Self {
+            metadata,
+            strings,
+            imports,
+            terrain,
+            files,
+            diagnostics,
+        })
     }
 
     /// Opens a map from a file, through the MPQ reader.
@@ -370,8 +377,8 @@ mod tests {
         b.extend_from_slice(&11i32.to_le_bytes());
         b.push(b'L');
         b.extend_from_slice(&0i32.to_le_bytes()); // usesCustomTileset
-        // Both texture lists declare zero entries and write none: the header
-        // declaration and the data have to agree or the header length is wrong.
+                                                  // Both texture lists declare zero entries and write none: the header
+                                                  // declaration and the data have to agree or the header length is wrong.
         b.extend_from_slice(&0i32.to_le_bytes()); // a = 0
         b.extend_from_slice(&0i32.to_le_bytes()); // b = 0
         b.extend_from_slice(&width.to_le_bytes());
@@ -394,7 +401,10 @@ mod tests {
     fn assembles_a_minimal_map() {
         let source = MemoryMapSource::new()
             .with("war3map.w3i", minimal_w3i())
-            .with("war3map.wts", b"STRING 1\r\n{\r\nReal Map Name\r\n}\r\n".to_vec())
+            .with(
+                "war3map.wts",
+                b"STRING 1\r\n{\r\nReal Map Name\r\n}\r\n".to_vec(),
+            )
             .with("war3map.w3e", minimal_w3e(33, 33));
 
         let map = Map::from_source(&source).unwrap();

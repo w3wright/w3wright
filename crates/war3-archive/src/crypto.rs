@@ -111,7 +111,10 @@ pub fn decrypt(table: &[u32; 0x500], data: &mut [u32], mut key: u32) {
         seed = seed.wrapping_add(table[0x400 + (key & 0xFF) as usize]);
         let plain = *value ^ (key.wrapping_add(seed));
         key = ((!key << 0x15).wrapping_add(3)) ^ plain.wrapping_add(seed).wrapping_add(seed << 5);
-        seed = plain.wrapping_add(seed).wrapping_add(seed << 5).wrapping_add(3);
+        seed = plain
+            .wrapping_add(seed)
+            .wrapping_add(seed << 5)
+            .wrapping_add(3);
         *value = plain;
     }
 }
@@ -173,10 +176,16 @@ mod tests {
         // Regression guard: using `hash & 0xFF` as the index makes all of these
         // collapse to one value. Pinned against an independent implementation.
         let t = crypt_table();
-        assert_eq!(hash_string(&t, HashType::TableOffset, "WAR3MAP.W3I"), 0x9871_45CE);
+        assert_eq!(
+            hash_string(&t, HashType::TableOffset, "WAR3MAP.W3I"),
+            0x9871_45CE
+        );
         assert_eq!(hash_string(&t, HashType::NameA, "WAR3MAP.W3I"), 0x33E8_87B7);
         assert_eq!(hash_string(&t, HashType::NameB, "WAR3MAP.W3I"), 0xD135_014A);
-        assert_eq!(hash_string(&t, HashType::TableOffset, "WAR3MAP.W3E"), 0xABD6_4F6D);
+        assert_eq!(
+            hash_string(&t, HashType::TableOffset, "WAR3MAP.W3E"),
+            0xABD6_4F6D
+        );
         assert_eq!(hash_string(&t, HashType::NameA, "WAR3MAP.W3E"), 0xF8C3_B168);
     }
 

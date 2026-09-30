@@ -530,8 +530,11 @@ impl MapInfo {
         let name = cursor.cstr()?;
         let author = cursor.cstr()?;
         let description = cursor.cstr()?;
-        let recommended_players =
-            if format_version >= 8 { Some(cursor.cstr()?) } else { None };
+        let recommended_players = if format_version >= 8 {
+            Some(cursor.cstr()?)
+        } else {
+            None
+        };
 
         // Historical fields for versions up to 8. The values are discarded, but
         // they must still be read or everything after them shifts.
@@ -572,17 +575,18 @@ impl MapInfo {
             None
         };
 
-        let loading_screen_number =
-            if format_version >= 17 { Some(cursor.i32()?) } else { None };
-
-        let loading_screen_path = if format_version >= 10
-            && format_version != 18
-            && format_version != 19
-        {
-            Some(cursor.cstr()?)
+        let loading_screen_number = if format_version >= 17 {
+            Some(cursor.i32()?)
         } else {
             None
         };
+
+        let loading_screen_path =
+            if format_version >= 10 && format_version != 18 && format_version != 19 {
+                Some(cursor.cstr()?)
+            } else {
+                None
+            };
 
         let (loading_screen_text, loading_screen_title, loading_screen_subtitle) =
             if format_version >= 10 {
@@ -597,16 +601,18 @@ impl MapInfo {
                 (None, None, None)
             };
 
-        let game_data_set = if format_version >= 17 { Some(cursor.i32()?) } else { None };
-
-        let prologue_screen_path = if format_version >= 13
-            && format_version != 18
-            && format_version != 19
-        {
-            Some(cursor.cstr()?)
+        let game_data_set = if format_version >= 17 {
+            Some(cursor.i32()?)
         } else {
             None
         };
+
+        let prologue_screen_path =
+            if format_version >= 13 && format_version != 18 && format_version != 19 {
+                Some(cursor.cstr()?)
+            } else {
+                None
+            };
 
         let (prologue_screen_text, prologue_screen_title, prologue_screen_subtitle) =
             if format_version >= 13 {
@@ -631,9 +637,21 @@ impl MapInfo {
             None
         };
 
-        let global_weather = if format_version >= 21 { Some(cursor.fourcc()?) } else { None };
-        let sound_environment = if format_version >= 22 { Some(cursor.cstr()?) } else { None };
-        let light_environment = if format_version >= 23 { Some(cursor.u8()?) } else { None };
+        let global_weather = if format_version >= 21 {
+            Some(cursor.fourcc()?)
+        } else {
+            None
+        };
+        let sound_environment = if format_version >= 22 {
+            Some(cursor.cstr()?)
+        } else {
+            None
+        };
+        let light_environment = if format_version >= 23 {
+            Some(cursor.u8()?)
+        } else {
+            None
+        };
         let water_tint = if format_version >= 25 {
             Some(WaterTint {
                 r: cursor.u8()?,
@@ -648,8 +666,11 @@ impl MapInfo {
         // The script language appears in two places: in the main block for
         // versions 26 and 27, and in the trailing section from 28 onwards. Only
         // the former is read here.
-        let script_language =
-            if format_version == 26 || format_version == 27 { Some(cursor.i32()?) } else { None };
+        let script_language = if format_version == 26 || format_version == 27 {
+            Some(cursor.i32()?)
+        } else {
+            None
+        };
         if script_language.is_none() && (26..=27).contains(&format_version) {
             diagnostics.push(Diagnostic::info(
                 DiagnosticCode::W3iScriptLanguageUnknown,
@@ -657,8 +678,16 @@ impl MapInfo {
             ));
         }
 
-        let graphics_modes = if format_version >= 29 { Some(cursor.i32()?) } else { None };
-        let game_data_version = if format_version >= 30 { Some(cursor.i32()?) } else { None };
+        let graphics_modes = if format_version >= 29 {
+            Some(cursor.i32()?)
+        } else {
+            None
+        };
+        let game_data_version = if format_version >= 30 {
+            Some(cursor.i32()?)
+        } else {
+            None
+        };
 
         if format_version >= 32 {
             // Forced camera zoom values. The semantics are not documented, but
@@ -684,7 +713,9 @@ impl MapInfo {
                 Ok(list) => players = list,
                 Err(e) => diagnostics.push(Diagnostic::warn(
                     DiagnosticCode::W3iMissingTrailingData,
-                    format!("the player section failed to parse; the rest of the tail was skipped: {e}"),
+                    format!(
+                        "the player section failed to parse; the rest of the tail was skipped: {e}"
+                    ),
                 )),
             }
         } else {
@@ -830,7 +861,11 @@ fn read_forces(cursor: &mut Cursor<'_>) -> Result<Vec<Force>> {
         let flags = cursor.u32()?;
         let players = cursor.u32()?;
         let name = cursor.cstr()?;
-        out.push(Force { flags, players, name });
+        out.push(Force {
+            flags,
+            players,
+            name,
+        });
     }
     Ok(out)
 }
@@ -843,7 +878,12 @@ fn read_upgrades(cursor: &mut Cursor<'_>) -> Result<Vec<Upgrade>> {
         let id = cursor.fourcc()?;
         let level = cursor.i32()?;
         let state = UpgradeState::from(cursor.i32()?);
-        out.push(Upgrade { players, id, level, state });
+        out.push(Upgrade {
+            players,
+            id,
+            level,
+            state,
+        });
     }
     Ok(out)
 }
@@ -855,7 +895,11 @@ fn read_random_units(cursor: &mut Cursor<'_>) -> Result<Vec<RandomUnitTable>> {
         let group = cursor.i32()?;
         let name = cursor.cstr()?;
         let columns = cursor.i32()?.clamp(0, 1024) as usize;
-        let column_types = cursor.u32s(columns)?.into_iter().map(|v| v as i32).collect();
+        let column_types = cursor
+            .u32s(columns)?
+            .into_iter()
+            .map(|v| v as i32)
+            .collect();
         let rows = cursor.i32()?.clamp(0, 65536) as usize;
         let mut row_list = Vec::with_capacity(rows);
         for _ in 0..rows {
@@ -866,7 +910,12 @@ fn read_random_units(cursor: &mut Cursor<'_>) -> Result<Vec<RandomUnitTable>> {
             }
             row_list.push(RandomUnitRow { chance, ids });
         }
-        out.push(RandomUnitTable { group, name, column_types, rows: row_list });
+        out.push(RandomUnitTable {
+            group,
+            name,
+            column_types,
+            rows: row_list,
+        });
     }
     Ok(out)
 }
@@ -889,7 +938,11 @@ fn read_random_items(cursor: &mut Cursor<'_>) -> Result<Vec<RandomItemTable>> {
             }
             set_list.push(RandomItemSet { items: item_list });
         }
-        out.push(RandomItemTable { number, name, sets: set_list });
+        out.push(RandomItemTable {
+            number,
+            name,
+            sets: set_list,
+        });
     }
     Ok(out)
 }
@@ -965,7 +1018,15 @@ mod tests {
         assert_eq!(info.height(), 128);
         assert!(!info.flags.is_melee());
         assert!(info.flags.has(MapFlags::CUSTOM_TEAMS));
-        assert_eq!(info.water_tint, Some(WaterTint { r: 255, g: 255, b: 255, a: 255 }));
+        assert_eq!(
+            info.water_tint,
+            Some(WaterTint {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255
+            })
+        );
     }
 
     #[test]

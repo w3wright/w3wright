@@ -31,8 +31,7 @@ fn encrypt(table: &[u32; 0x500], data: &mut [u32], mut key: u32) {
         seed = seed.wrapping_add(table[0x400 + (key & 0xFF) as usize]);
         let plain = *value;
         *value = plain ^ key.wrapping_add(seed);
-        key = ((!key << 0x15).wrapping_add(3))
-            ^ plain.wrapping_add(seed).wrapping_add(seed << 5);
+        key = ((!key << 0x15).wrapping_add(3)) ^ plain.wrapping_add(seed).wrapping_add(seed << 5);
         seed = plain
             .wrapping_add(seed)
             .wrapping_add(seed << 5)
@@ -235,7 +234,9 @@ fn main() {
     std::fs::write(&out_path, &out).expect("failed to write output");
 
     println!("wrote {out_path} ({} bytes)", out.len());
-    println!("  header at {HEADER_POS}, sector {SECTOR_SIZE}, hash {HASH_SIZE}, blocks {block_count}");
+    println!(
+        "  header at {HEADER_POS}, sector {SECTOR_SIZE}, hash {HASH_SIZE}, blocks {block_count}"
+    );
     println!("  hash table at 0x{hash_pos:X}, block table at 0x{block_pos:X}");
     for m in &built {
         println!(

@@ -131,7 +131,11 @@ pub struct Diagnostic {
 impl Diagnostic {
     /// Builds a diagnostic.
     pub fn new(severity: Severity, code: DiagnosticCode, message: impl Into<String>) -> Self {
-        Self { severity, code, message: message.into() }
+        Self {
+            severity,
+            code,
+            message: message.into(),
+        }
     }
 
     /// `Info` level.
@@ -204,13 +208,19 @@ impl Diagnostics {
     /// Number of `Error`-level diagnostics.
     #[must_use]
     pub fn error_count(&self) -> usize {
-        self.items.iter().filter(|d| d.severity == Severity::Error).count()
+        self.items
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count()
     }
 
     /// Number of `Warning`-level diagnostics.
     #[must_use]
     pub fn warning_count(&self) -> usize {
-        self.items.iter().filter(|d| d.severity == Severity::Warning).count()
+        self.items
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count()
     }
 
     /// Whether nothing was reported.
@@ -242,7 +252,9 @@ impl IntoIterator for Diagnostics {
 
 impl FromIterator<Diagnostic> for Diagnostics {
     fn from_iter<T: IntoIterator<Item = Diagnostic>>(iter: T) -> Self {
-        Self { items: iter.into_iter().collect() }
+        Self {
+            items: iter.into_iter().collect(),
+        }
     }
 }
 
@@ -253,9 +265,18 @@ mod tests {
     #[test]
     fn counts_by_severity() {
         let mut d = Diagnostics::new();
-        d.push(Diagnostic::info(DiagnosticCode::W3eUnknownWaterBit, "bit 15 set"));
-        d.push(Diagnostic::warn(DiagnosticCode::W3eRecordSizeMismatch, "11 vs 8"));
-        d.push(Diagnostic::error(DiagnosticCode::MpqNoListfile, "no listfile"));
+        d.push(Diagnostic::info(
+            DiagnosticCode::W3eUnknownWaterBit,
+            "bit 15 set",
+        ));
+        d.push(Diagnostic::warn(
+            DiagnosticCode::W3eRecordSizeMismatch,
+            "11 vs 8",
+        ));
+        d.push(Diagnostic::error(
+            DiagnosticCode::MpqNoListfile,
+            "no listfile",
+        ));
 
         assert_eq!(d.len(), 3);
         assert_eq!(d.warning_count(), 1);
@@ -266,14 +287,23 @@ mod tests {
     #[test]
     fn info_only_is_not_a_problem() {
         let mut d = Diagnostics::new();
-        d.push(Diagnostic::info(DiagnosticCode::AssetFallbackUsed, "no game data"));
+        d.push(Diagnostic::info(
+            DiagnosticCode::AssetFallbackUsed,
+            "no game data",
+        ));
         assert!(!d.has_problems());
     }
 
     #[test]
     fn codes_are_stable_strings() {
-        assert_eq!(DiagnosticCode::W3eRecordSizeMismatch.as_str(), "w3e.record-size-mismatch");
-        assert_eq!(DiagnosticCode::MpqHeaderOffset.as_str(), "mpq.header-offset");
+        assert_eq!(
+            DiagnosticCode::W3eRecordSizeMismatch.as_str(),
+            "w3e.record-size-mismatch"
+        );
+        assert_eq!(
+            DiagnosticCode::MpqHeaderOffset.as_str(),
+            "mpq.header-offset"
+        );
     }
 
     #[test]

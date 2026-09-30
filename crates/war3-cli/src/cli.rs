@@ -63,7 +63,9 @@ pub fn required_arg<'a>(
 ) -> Result<&'a str> {
     match args.get(index) {
         Some(v) => Ok(v.as_str()),
-        None => Err(war3_core::Error::msg(format!("missing {what}; usage: {usage}"))),
+        None => Err(war3_core::Error::msg(format!(
+            "missing {what}; usage: {usage}"
+        ))),
     }
 }
 
@@ -104,7 +106,14 @@ mod tests {
 
     #[test]
     fn help_mentions_every_documented_command() {
-        for cmd in ["map info", "map list", "map file", "map terrain", "map archive", "meta check"] {
+        for cmd in [
+            "map info",
+            "map list",
+            "map file",
+            "map terrain",
+            "map archive",
+            "meta check",
+        ] {
             assert!(HELP.contains(cmd), "help is missing {cmd}");
         }
     }

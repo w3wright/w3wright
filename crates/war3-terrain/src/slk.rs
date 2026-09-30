@@ -261,8 +261,7 @@ fn split_records(line: &str) -> Vec<String> {
         if byte != b'C' || in_quotes {
             continue;
         }
-        let at_boundary =
-            i == 0 || bytes[i - 1] == b';' || bytes[i - 1].is_ascii_whitespace();
+        let at_boundary = i == 0 || bytes[i - 1] == b';' || bytes[i - 1].is_ascii_whitespace();
         let ends_record = i + 1 == bytes.len() || bytes[i + 1] == b';';
         if at_boundary && ends_record && i > start {
             records.push(line[start..i].to_string());
@@ -325,7 +324,11 @@ impl WaterTable {
             }
             rows.insert(
                 key.to_lowercase(),
-                WaterRow { key: key.to_string(), height, extra },
+                WaterRow {
+                    key: key.to_string(),
+                    height,
+                    extra,
+                },
             );
         }
         Self { rows }
@@ -449,7 +452,10 @@ C;X1;Y63;K\"unsf\";C;X2;K\"Sfx\";C;X3;K\"Profile\";C;X4;K-1\n";
     #[test]
     fn header_and_boundary_records_are_ignored() {
         let t = parse_sylk("ID;PWXL;N;E\nB;X2;Y2;D0\nF;P0;DG0;G0\nC;X1;Y1;K\"a\"\n");
-        assert!(t.row_keys().is_empty(), "only the header row should be parsed");
+        assert!(
+            t.row_keys().is_empty(),
+            "only the header row should be parsed"
+        );
         assert_eq!(t.cell_count(), 1);
         assert_eq!(t.column_index("a"), Some(1));
     }
@@ -459,7 +465,8 @@ C;X1;Y63;K\"unsf\";C;X2;K\"Sfx\";C;X3;K\"Profile\";C;X4;K-1\n";
         // Guards two silent-loss cases at once: a space separating records must
         // still be recognised as a boundary, and a `C` inside a quoted value
         // must not be mistaken for one.
-        let t = parse_sylk("B;X9;Y9;D0 C;X1;Y1;K\"ID\";C;X2;K\"field\"\nC;X1;Y2;K\"k\";C;X2;K\"v\"\n");
+        let t =
+            parse_sylk("B;X9;Y9;D0 C;X1;Y1;K\"ID\";C;X2;K\"field\"\nC;X1;Y2;K\"k\";C;X2;K\"v\"\n");
         assert_eq!(t.column_index("ID"), Some(1));
         assert_eq!(t.column_index("field"), Some(2));
         assert_eq!(t.get("field", "k"), Some("v"));
@@ -468,7 +475,11 @@ C;X1;Y63;K\"unsf\";C;X2;K\"Sfx\";C;X3;K\"Profile\";C;X4;K-1\n";
     #[test]
     fn empty_input_is_diagnosed_not_silently_empty() {
         let t = parse_sylk("");
-        assert!(t.diagnostics().items().iter().any(|d| d.code == DiagnosticCode::AssetFallbackUsed));
+        assert!(t
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|d| d.code == DiagnosticCode::AssetFallbackUsed));
     }
 
     #[test]
@@ -508,9 +519,18 @@ C;X1;Y63;K\"unsf\";C;X2;K\"Sfx\";C;X3;K\"Profile\";C;X4;K-1\n";
     #[test]
     fn water_height_is_looked_up_per_tileset() {
         let w = WaterTable::parse(&water_slk());
-        assert_eq!(w.height_for_tileset(crate::w3e::Tileset::LordaeronSummer), Some(-0.7));
-        assert_eq!(w.height_for_tileset(crate::w3e::Tileset::Ashenvale), Some(-0.6));
-        assert_eq!(w.height_for_tileset(crate::w3e::Tileset::SunkenRuins), Some(-0.5));
+        assert_eq!(
+            w.height_for_tileset(crate::w3e::Tileset::LordaeronSummer),
+            Some(-0.7)
+        );
+        assert_eq!(
+            w.height_for_tileset(crate::w3e::Tileset::Ashenvale),
+            Some(-0.6)
+        );
+        assert_eq!(
+            w.height_for_tileset(crate::w3e::Tileset::SunkenRuins),
+            Some(-0.5)
+        );
     }
 
     #[test]
@@ -523,7 +543,10 @@ C;X1;Y63;K\"unsf\";C;X2;K\"Sfx\";C;X3;K\"Profile\";C;X4;K-1\n";
     fn empty_water_table_returns_none() {
         let w = WaterTable::new();
         assert!(w.is_empty());
-        assert_eq!(w.height_for_tileset(crate::w3e::Tileset::LordaeronSummer), None);
+        assert_eq!(
+            w.height_for_tileset(crate::w3e::Tileset::LordaeronSummer),
+            None
+        );
     }
 
     #[test]

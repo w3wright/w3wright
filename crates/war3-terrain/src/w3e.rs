@@ -477,7 +477,14 @@ impl TerrainTile {
         byte5: u8,
         byte6: u8,
     ) -> Self {
-        Self { ground_height, water_and_flags, byte4, byte5, byte6, byte7: 0 }
+        Self {
+            ground_height,
+            water_and_flags,
+            byte4,
+            byte5,
+            byte6,
+            byte7: 0,
+        }
     }
 
     /// Builds a v12-shaped tile point.
@@ -490,7 +497,14 @@ impl TerrainTile {
         byte6: u8,
         byte7: u8,
     ) -> Self {
-        Self { ground_height, water_and_flags, byte4, byte5, byte6, byte7 }
+        Self {
+            ground_height,
+            water_and_flags,
+            byte4,
+            byte5,
+            byte6,
+            byte7,
+        }
     }
 
     /// Decodes a record for a given version.
@@ -614,7 +628,10 @@ impl Terrain {
         }
         let magic: [u8; 4] = [bytes[0], bytes[1], bytes[2], bytes[3]];
         if magic != MAGIC {
-            return Err(Error::from(ParseError::BadMagic { expected: "W3E!", found: magic }));
+            return Err(Error::from(ParseError::BadMagic {
+                expected: "W3E!",
+                found: magic,
+            }));
         }
 
         // ---- header ----
@@ -971,7 +988,9 @@ impl Terrain {
     /// `None` means unknown; callers should not fall back to a constant.
     #[must_use]
     pub fn water_zero_offset(&self, water: &WaterTable) -> Option<f32> {
-        water.height_for_tileset(self.tileset).map(|h| h * WORLD_UNITS_PER_TILE)
+        water
+            .height_for_tileset(self.tileset)
+            .map(|h| h * WORLD_UNITS_PER_TILE)
     }
 }
 
@@ -1180,8 +1199,7 @@ mod tests {
         HEADER_FIXED_SIZE + 4 * GROUND_TEXTURE_COUNT + 4 * CLIFF_TEXTURE_COUNT;
 
     /// Offset of `width`, so tests can patch it without hard-coding 37.
-    const WIDTH_OFFSET: usize =
-        17 + 4 * GROUND_TEXTURE_COUNT + 4 + 4 * CLIFF_TEXTURE_COUNT;
+    const WIDTH_OFFSET: usize = 17 + 4 * GROUND_TEXTURE_COUNT + 4 + 4 * CLIFF_TEXTURE_COUNT;
     /// `height` follows `width`.
     const HEIGHT_OFFSET: usize = WIDTH_OFFSET + 4;
 
@@ -1265,7 +1283,11 @@ mod tests {
         bytes[4..8].copy_from_slice(&11i32.to_le_bytes());
 
         let t = Terrain::parse(&bytes).unwrap();
-        assert_eq!(t.version, W3eVersion::V12, "geometry must decide the version");
+        assert_eq!(
+            t.version,
+            W3eVersion::V12,
+            "geometry must decide the version"
+        );
         assert_eq!(t.tiles.len(), 16);
         assert!(
             t.diagnostics
@@ -1292,7 +1314,10 @@ mod tests {
         bytes.truncate(bytes.len() - RECORD_SIZE_V11);
         bytes.extend_from_slice(&[0u8; 9]);
         let err = Terrain::parse(&bytes).unwrap_err();
-        assert!(err.to_string().contains("neither 7 (v11) nor 8 (v12)"), "{err}");
+        assert!(
+            err.to_string().contains("neither 7 (v11) nor 8 (v12)"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1332,7 +1357,11 @@ mod tests {
         let mut bytes = build(W3eVersion::V11, 1, 1, 0);
         bytes[WIDTH_OFFSET..WIDTH_OFFSET + 4].copy_from_slice(&0i32.to_le_bytes());
         let result = std::panic::catch_unwind(|| Terrain::parse(&bytes).is_err());
-        assert_eq!(result.ok(), Some(true), "must return an error rather than panic");
+        assert_eq!(
+            result.ok(),
+            Some(true),
+            "must return an error rather than panic"
+        );
     }
 
     #[test]
@@ -1429,7 +1458,10 @@ mod tests {
         );
 
         let out = t.write(W3eVersion::V12).unwrap();
-        assert_eq!(out, bytes, "flags and reserved bits must survive the round trip");
+        assert_eq!(
+            out, bytes,
+            "flags and reserved bits must survive the round trip"
+        );
     }
 
     #[test]
@@ -1452,8 +1484,7 @@ mod tests {
         let one_tile_up = TerrainTile::new(0x2200, WaterAndFlags(0), 0, 0, 0x22);
         assert!((one_tile_up.tile_height(W3eVersion::V11) - 1.0).abs() < f32::EPSILON);
         assert!(
-            (one_tile_up.world_height(W3eVersion::V11) - WORLD_UNITS_PER_TILE).abs()
-                < f32::EPSILON
+            (one_tile_up.world_height(W3eVersion::V11) - WORLD_UNITS_PER_TILE).abs() < f32::EPSILON
         );
 
         // Layer height 3 is also +1 tile.
@@ -1529,8 +1560,14 @@ mod tests {
     #[test]
     fn output_is_deterministic() {
         let bytes = build(W3eVersion::V11, 4, 4, 3);
-        let a = Terrain::parse(&bytes).unwrap().write(W3eVersion::V11).unwrap();
-        let b = Terrain::parse(&bytes).unwrap().write(W3eVersion::V11).unwrap();
+        let a = Terrain::parse(&bytes)
+            .unwrap()
+            .write(W3eVersion::V11)
+            .unwrap();
+        let b = Terrain::parse(&bytes)
+            .unwrap()
+            .write(W3eVersion::V11)
+            .unwrap();
         assert_eq!(a, b);
     }
 }

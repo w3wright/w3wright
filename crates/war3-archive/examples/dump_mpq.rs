@@ -18,7 +18,10 @@ fn main() {
 
     println!("file_offset        = {}", h.file_offset);
     println!("header_size        = {}", h.header_size);
-    println!("archive_size       = {} (0x{:X})", h.archive_size, h.archive_size);
+    println!(
+        "archive_size       = {} (0x{:X})",
+        h.archive_size, h.archive_size
+    );
     println!("format_version     = {}", h.format_version);
     println!("sector_size_shift  = {}", h.sector_size_shift);
     println!("sector_size        = {}", h.sector_size());

@@ -62,11 +62,14 @@ impl<'a> Cursor<'a> {
             needed: len,
             available: 0,
         })?;
-        let slice = self.bytes.get(self.pos..end).ok_or(ParseError::UnexpectedEof {
-            offset: self.pos,
-            needed: len,
-            available: self.remaining(),
-        })?;
+        let slice = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or(ParseError::UnexpectedEof {
+                offset: self.pos,
+                needed: len,
+                available: self.remaining(),
+            })?;
         self.pos = end;
         Ok(slice)
     }
@@ -194,7 +197,11 @@ mod tests {
         let err = c.u32().unwrap_err();
         assert_eq!(
             err,
-            ParseError::UnexpectedEof { offset: 2, needed: 4, available: 1 }
+            ParseError::UnexpectedEof {
+                offset: 2,
+                needed: 4,
+                available: 1
+            }
         );
     }
 

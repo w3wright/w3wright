@@ -90,7 +90,10 @@ impl StringTable {
             entries.insert(index, value_lines.join("\n"));
         }
 
-        Self { entries, diagnostics }
+        Self {
+            entries,
+            diagnostics,
+        }
     }
 
     /// A value by index.
@@ -141,7 +144,9 @@ impl StringTable {
                 None => {
                     diagnostics.push(Diagnostic::warn(
                         DiagnosticCode::WtsMissingKey,
-                        format!("value references TRIGSTR_{index:03}, which the .wts does not have"),
+                        format!(
+                            "value references TRIGSTR_{index:03}, which the .wts does not have"
+                        ),
                     ));
                     value.to_owned()
                 }
@@ -291,6 +296,9 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         let first = text.find("STRING 1").unwrap();
         let second = text.find("STRING 9").unwrap();
-        assert!(first < second, "entries must be written in ascending index order:\n{text}");
+        assert!(
+            first < second,
+            "entries must be written in ascending index order:\n{text}"
+        );
     }
 }

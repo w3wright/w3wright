@@ -266,8 +266,7 @@ impl FieldMeta {
         if index < 0 {
             return new_value.to_string();
         }
-        let mut parts: Vec<String> =
-            existing.split(',').map(|s| s.trim().to_string()).collect();
+        let mut parts: Vec<String> = existing.split(',').map(|s| s.trim().to_string()).collect();
         let slot = index as usize;
         if parts.len() <= slot {
             parts.resize(slot + 1, String::new());
@@ -283,7 +282,10 @@ impl FieldMeta {
 /// upgrades do. Units, items, destructables and buffs do not.
 #[must_use]
 pub const fn has_level_in_binary(kind: ObjectKind) -> bool {
-    matches!(kind, ObjectKind::Ability | ObjectKind::Doodad | ObjectKind::Upgrade)
+    matches!(
+        kind,
+        ObjectKind::Ability | ObjectKind::Doodad | ObjectKind::Upgrade
+    )
 }
 
 #[cfg(test)]
@@ -292,7 +294,10 @@ mod tests {
 
     #[test]
     fn item_and_unit_share_the_same_metadata_slk() {
-        assert_eq!(ObjectKind::Item.metadata_slk(), ObjectKind::Unit.metadata_slk());
+        assert_eq!(
+            ObjectKind::Item.metadata_slk(),
+            ObjectKind::Unit.metadata_slk()
+        );
     }
 
     #[test]
@@ -307,7 +312,11 @@ mod tests {
         files.sort_unstable();
         let before = files.len();
         files.dedup();
-        assert_eq!(files.len(), before, "the seven categories need distinct map files");
+        assert_eq!(
+            files.len(),
+            before,
+            "the seven categories need distinct map files"
+        );
     }
 
     #[test]

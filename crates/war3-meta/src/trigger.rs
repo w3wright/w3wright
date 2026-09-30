@@ -80,7 +80,8 @@ impl TriggerType {
     /// sitting in the last field would be mistaken for a type.
     #[must_use]
     pub fn candidate_is_known_type(&self, known: &BTreeMap<String, TriggerType>) -> bool {
-        self.candidate_base_type().is_some_and(|t| known.contains_key(t))
+        self.candidate_base_type()
+            .is_some_and(|t| known.contains_key(t))
     }
 }
 
@@ -125,7 +126,10 @@ impl TriggerFunction {
     /// the writer.
     #[must_use]
     pub fn serialized_arg_count(&self) -> usize {
-        self.args.iter().filter(|a| a.type_name != "nothing").count()
+        self.args
+            .iter()
+            .filter(|a| a.type_name != "nothing")
+            .count()
     }
 
     /// The parameter at a given position among those that are serialised.
@@ -178,7 +182,10 @@ impl TriggerData {
     /// This is a legitimate state, not an error.
     #[must_use]
     pub fn empty() -> Self {
-        Self { empty: true, ..Default::default() }
+        Self {
+            empty: true,
+            ..Default::default()
+        }
     }
 
     /// Whether the definitions are usable.
@@ -235,7 +242,11 @@ impl TriggerData {
                 "UI\\TriggerData.txt is unavailable, so trigger definitions cannot be read; \
                  .wtg and .wct cannot be parsed without them",
             ));
-            return Self { diagnostics, empty: true, ..Default::default() };
+            return Self {
+                diagnostics,
+                empty: true,
+                ..Default::default()
+            };
         };
 
         let mut data = Self::parse_ini(&text);
@@ -332,7 +343,11 @@ impl TriggerData {
                             max: None,
                         })
                         .collect();
-                    let function = TriggerFunction { name: key.to_string(), args, returns };
+                    let function = TriggerFunction {
+                        name: key.to_string(),
+                        args,
+                        returns,
+                    };
                     match section.as_str() {
                         "TriggerEvents" => {
                             data.events.insert(key.to_string(), function);
@@ -427,7 +442,10 @@ CreateUnit=,unit,player,integer,real,real,real
         // as the type is wrong.
         assert_eq!(
             unitcode.extra,
-            vec!["WESTRING_TRIGTYPE_unitcode".to_string(), "integer".to_string()]
+            vec![
+                "WESTRING_TRIGTYPE_unitcode".to_string(),
+                "integer".to_string()
+            ]
         );
         assert_eq!(unitcode.candidate_base_type(), Some("integer"));
         assert!(unitcode.candidate_is_known_type(&data.types));
@@ -437,7 +455,10 @@ CreateUnit=,unit,player,integer,real,real,real
     fn a_literal_display_name_is_not_mistaken_for_a_type() {
         let data = TriggerData::parse_ini(SAMPLE);
         let radian = data.types.get("radian").unwrap();
-        assert_eq!(radian.extra, vec!["degrees".to_string(), "real".to_string()]);
+        assert_eq!(
+            radian.extra,
+            vec!["degrees".to_string(), "real".to_string()]
+        );
         assert_eq!(radian.candidate_base_type(), Some("real"));
         assert!(radian.candidate_is_known_type(&data.types));
         assert!(!radian.is_self_contained());
@@ -492,7 +513,11 @@ CreateUnit=,unit,player,integer,real,real,real
         let data = TriggerData::parse_ini(SAMPLE);
         let some = data.function("SomeAction").unwrap();
         assert_eq!(some.args.len(), 2);
-        assert_eq!(some.serialized_arg_count(), 1, "nothing args must be skipped");
+        assert_eq!(
+            some.serialized_arg_count(),
+            1,
+            "nothing args must be skipped"
+        );
         assert_eq!(some.serialized_arg(0).unwrap().type_name, "unit");
         assert!(some.serialized_arg(1).is_none());
     }
@@ -500,9 +525,14 @@ CreateUnit=,unit,player,integer,real,real,real
     #[test]
     fn zero_arg_functions_serialize_no_args() {
         let data = TriggerData::parse_ini(SAMPLE);
-        assert_eq!(data.function("DoNothing").unwrap().serialized_arg_count(), 0);
         assert_eq!(
-            data.function("MapInitializationEvent").unwrap().serialized_arg_count(),
+            data.function("DoNothing").unwrap().serialized_arg_count(),
+            0
+        );
+        assert_eq!(
+            data.function("MapInitializationEvent")
+                .unwrap()
+                .serialized_arg_count(),
             0
         );
     }
@@ -520,7 +550,10 @@ CreateUnit=,unit,player,integer,real,real,real
     fn preset_type_lookup_uses_field_two() {
         let data = TriggerData::parse_ini(SAMPLE);
         let mut diags = Diagnostics::new();
-        assert_eq!(data.preset_type("Player00", &mut diags).as_deref(), Some("player"));
+        assert_eq!(
+            data.preset_type("Player00", &mut diags).as_deref(),
+            Some("player")
+        );
         assert!(diags.is_empty());
     }
 

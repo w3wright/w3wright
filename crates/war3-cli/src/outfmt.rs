@@ -127,7 +127,10 @@ mod tests {
     #[test]
     fn warning_diagnostics_are_a_problem() {
         let mut d = Diagnostics::new();
-        d.push(Diagnostic::warn(DiagnosticCode::W3eRecordSizeMismatch, "11 vs 12"));
+        d.push(Diagnostic::warn(
+            DiagnosticCode::W3eRecordSizeMismatch,
+            "11 vs 12",
+        ));
         assert!(diagnostics(&d, false));
     }
 }

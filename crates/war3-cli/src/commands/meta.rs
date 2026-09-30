@@ -102,7 +102,11 @@ fn check(args: &[String]) -> Result<ExitCode> {
         );
     }
     for (p, why) in mpq.failures() {
-        println!("{}{} could not be opened: {why}", outfmt::INDENT, p.display());
+        println!(
+            "{}{} could not be opened: {why}",
+            outfmt::INDENT,
+            p.display()
+        );
     }
     println!("{}", "=".repeat(60));
 
@@ -116,10 +120,22 @@ fn check(args: &[String]) -> Result<ExitCode> {
         let rel = format!("{}\\{}", kind.metadata_dir(), kind.metadata_slk());
         match meta.get(kind) {
             Some(table) if !table.is_empty() => {
-                println!("{}{:<14} {:>6} fields   {}", outfmt::INDENT, kind, table.len(), rel);
+                println!(
+                    "{}{:<14} {:>6} fields   {}",
+                    outfmt::INDENT,
+                    kind,
+                    table.len(),
+                    rel
+                );
             }
             _ => {
-                println!("{}{:<14} {:>6}          {}  <- missing", outfmt::INDENT, kind, "-", rel);
+                println!(
+                    "{}{:<14} {:>6}          {}  <- missing",
+                    outfmt::INDENT,
+                    kind,
+                    "-",
+                    rel
+                );
             }
         }
     }
@@ -199,5 +215,9 @@ fn check(args: &[String]) -> Result<ExitCode> {
         }
     );
 
-    Ok(if has_problems { ExitCode::from(1) } else { ExitCode::SUCCESS })
+    Ok(if has_problems {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }

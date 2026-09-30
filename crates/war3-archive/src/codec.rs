@@ -56,10 +56,16 @@ impl fmt::Display for CodecError {
             Self::BadCode => f.write_str("invalid deflate code in stream"),
             Self::BadDistance(d) => write!(f, "deflate distance {d} exceeds output so far"),
             Self::StoredBlockLengthMismatch { len, nlen } => {
-                write!(f, "stored block length {len:#06X} and complement {nlen:#06X} disagree")
+                write!(
+                    f,
+                    "stored block length {len:#06X} and complement {nlen:#06X} disagree"
+                )
             }
             Self::SizeMismatch { expected, got } => {
-                write!(f, "decompressed length mismatch: expected {expected}, got {got}")
+                write!(
+                    f,
+                    "decompressed length mismatch: expected {expected}, got {got}"
+                )
             }
             Self::Unsupported(m) => write!(f, "unsupported compression mask {m:#010X}"),
         }
@@ -139,7 +145,10 @@ pub fn decompress(data: &[u8], mask: u32, expected: usize) -> Result<Vec<u8>, Co
 
     let out = zlib_decompress(data, expected)?;
     if out.len() != expected {
-        return Err(CodecError::SizeMismatch { expected, got: out.len() });
+        return Err(CodecError::SizeMismatch {
+            expected,
+            got: out.len(),
+        });
     }
     Ok(out)
 }
@@ -337,8 +346,9 @@ const DIST_EXTRA: [u8; 30] = [
     13,
 ];
 /// The order in which code lengths are stored, which is not the natural order.
-const CODE_LENGTH_ORDER: [usize; 19] =
-    [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+const CODE_LENGTH_ORDER: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
 
 /// Decompresses raw deflate data.
 ///
@@ -539,9 +549,18 @@ mod tests {
         // often zero.
         assert!(is_uncompressed_mask(0x0000_0000), "no flags");
         assert!(is_uncompressed_mask(0x0000_0008), "only unrelated low bits");
-        assert!(!is_uncompressed_mask(0x0400_0200), "multi-block + COMPRESSED, as seen for zlib");
-        assert!(!is_uncompressed_mask(0x0100_0200), "single-unit + COMPRESSED, as seen for zlib");
-        assert!(!is_uncompressed_mask(0x0000_0202), "low byte also names zlib");
+        assert!(
+            !is_uncompressed_mask(0x0400_0200),
+            "multi-block + COMPRESSED, as seen for zlib"
+        );
+        assert!(
+            !is_uncompressed_mask(0x0100_0200),
+            "single-unit + COMPRESSED, as seen for zlib"
+        );
+        assert!(
+            !is_uncompressed_mask(0x0000_0202),
+            "low byte also names zlib"
+        );
     }
 
     #[test]
@@ -595,7 +614,10 @@ mod tests {
 
     #[test]
     fn bad_block_type_is_rejected() {
-        assert!(matches!(inflate(&[0x07], 0), Err(CodecError::BadBlockType(3))));
+        assert!(matches!(
+            inflate(&[0x07], 0),
+            Err(CodecError::BadBlockType(3))
+        ));
     }
 
     #[test]

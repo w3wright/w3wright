@@ -73,7 +73,9 @@ impl MetaTable {
             let id = FourCC::from_str_lossy(id_text);
 
             let mut field = slk.get("field", row).unwrap_or("").to_string();
-            let data = slk.get("data", row).and_then(|v| v.trim().parse::<i32>().ok());
+            let data = slk
+                .get("data", row)
+                .and_then(|v| v.trim().parse::<i32>().ok());
 
             // The `Data` trap: the real name is `Data` plus a letter.
             if field == "Data" {
@@ -107,8 +109,12 @@ impl MetaTable {
                 id,
                 field: field.clone(),
                 slk: slk.get("slk", row).map(str::to_string),
-                index: slk.get("index", row).and_then(|v| v.trim().parse::<i32>().ok()),
-                repeat: slk.get("repeat", row).and_then(|v| v.trim().parse::<i32>().ok()),
+                index: slk
+                    .get("index", row)
+                    .and_then(|v| v.trim().parse::<i32>().ok()),
+                repeat: slk
+                    .get("repeat", row)
+                    .and_then(|v| v.trim().parse::<i32>().ok()),
                 data,
                 type_name: slk.get("type", row).map(str::to_string),
                 string_ext: slk
@@ -118,8 +124,12 @@ impl MetaTable {
                 display_key: slk.get("displayName", row).map(str::to_string),
                 use_specific: slk.get("useSpecific", row).map(str::to_string),
                 can_be_empty: slk.get("canBeEmpty", row).map(|v| v.trim() != "0"),
-                min_val: slk.get("minVal", row).and_then(|v| v.trim().parse::<f32>().ok()),
-                max_val: slk.get("maxVal", row).and_then(|v| v.trim().parse::<f32>().ok()),
+                min_val: slk
+                    .get("minVal", row)
+                    .and_then(|v| v.trim().parse::<f32>().ok()),
+                max_val: slk
+                    .get("maxVal", row)
+                    .and_then(|v| v.trim().parse::<f32>().ok()),
                 // Hard-coded: only these three categories carry levels, and the
                 // file has no column saying so.
                 has_level: matches!(
@@ -141,7 +151,12 @@ impl MetaTable {
             ));
         }
 
-        Self { kind: Some(kind), fields, by_field_name, diagnostics }
+        Self {
+            kind: Some(kind),
+            fields,
+            by_field_name,
+            diagnostics,
+        }
     }
 
     /// How many fields are known.
@@ -310,7 +325,10 @@ C;X1;Y3;K\"atp9\";C;X2;K\"Data\";C;X3;K\"Profile\";C;X4;K-1;C;X5;K1;C;X6;K9;C;X7
     fn display_keys_contain_westring_keys_not_text() {
         let table = MetaTable::parse_sylk_text(ObjectKind::Unit, UNIT_META);
         for key in table.display_keys() {
-            assert!(key.starts_with("WESTRING_"), "displayName must be a key: {key}");
+            assert!(
+                key.starts_with("WESTRING_"),
+                "displayName must be a key: {key}"
+            );
         }
     }
 
@@ -357,7 +375,10 @@ C;X1;Y3;K\"atp9\";C;X2;K\"Data\";C;X3;K\"Profile\";C;X4;K-1;C;X5;K1;C;X6;K9;C;X7
             .items()
             .iter()
             .any(|d| d.code == DiagnosticCode::AssetFallbackUsed));
-        assert_eq!(table.get(FourCC::from_str_lossy("xxxx")).unwrap().field, "Data");
+        assert_eq!(
+            table.get(FourCC::from_str_lossy("xxxx")).unwrap().field,
+            "Data"
+        );
     }
 
     #[test]
@@ -380,7 +401,10 @@ C;X1;Y3;K\"atp9\";C;X2;K\"Data\";C;X3;K\"Profile\";C;X4;K-1;C;X5;K1;C;X6;K9;C;X7
     #[test]
     fn meta_table_set_reports_missing_kinds() {
         let mut set = MetaTableSet::new();
-        set.insert(ObjectKind::Unit, MetaTable::parse_sylk_text(ObjectKind::Unit, UNIT_META));
+        set.insert(
+            ObjectKind::Unit,
+            MetaTable::parse_sylk_text(ObjectKind::Unit, UNIT_META),
+        );
         assert_eq!(set.len(), 1);
         let missing = set.missing();
         assert_eq!(missing.len(), 6);

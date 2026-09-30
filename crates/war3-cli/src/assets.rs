@@ -17,16 +17,21 @@
 
 use std::path::{Path, PathBuf};
 
+use war3_archive::Archive;
 use war3_core::assets::normalize_asset_path;
 use war3_core::AssetSource;
-use war3_archive::Archive;
 
 /// Archives to try, in order.
 ///
 /// The ordering follows the game's own override precedence: the base archive
 /// first, then the expansion and its localisation, then patches.
-const ARCHIVE_NAMES: &[&str] =
-    &["war3.mpq", "War3x.mpq", "War3xLocal.mpq", "War3Patch.mpq", "war3local.mpq"];
+const ARCHIVE_NAMES: &[&str] = &[
+    "war3.mpq",
+    "War3x.mpq",
+    "War3xLocal.mpq",
+    "War3Patch.mpq",
+    "war3local.mpq",
+];
 
 /// A chain of MPQ archives queried in order.
 #[derive(Debug)]

@@ -71,17 +71,30 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnexpectedEof { offset, needed, available } => write!(
+            Self::UnexpectedEof {
+                offset,
+                needed,
+                available,
+            } => write!(
                 f,
                 "truncated at offset {offset}: needed {needed} bytes, {available} available"
             ),
             Self::BadMagic { expected, found } => {
                 write!(f, "bad magic: expected {expected:?}, found {found:02X?}")
             }
-            Self::UnsupportedVersion { format, found, supported } => {
-                write!(f, "{format} version {found} is not supported (supported: {supported:?})")
+            Self::UnsupportedVersion {
+                format,
+                found,
+                supported,
+            } => {
+                write!(
+                    f,
+                    "{format} version {found} is not supported (supported: {supported:?})"
+                )
             }
-            Self::Validation { check, detail } => write!(f, "validation failed [{check}]: {detail}"),
+            Self::Validation { check, detail } => {
+                write!(f, "validation failed [{check}]: {detail}")
+            }
             Self::BadField { field, reason } => write!(f, "field {field} is invalid: {reason}"),
             Self::BadString { offset } => {
                 write!(f, "string at offset {offset} is not valid UTF-8")
