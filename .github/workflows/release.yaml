@@ -1,0 +1,326 @@
+name: Release
+
+# Publishing is not idempotent: a crate name and version pair can never be
+# reused, and a yanked version cannot be un-yanked. So this workflow is written
+# to refuse rather than to guess, and it is safe to re-run after a partial
+# failure because each crate is skipped when its version is already on the
+# registry.
+
+on:
+  push:
+    tags: [ "v*.*.*" ]
+  # Manual runs are a no-op unless `publish` is ticked, which makes "do not
+  # upload by accident" structural instead of something to remember. There is
+  # no separate dry-run switch: the test job already runs `cargo package
+  # --workspace`, which is the local equivalent, and a switch that only causes
+  # the publishing jobs to be skipped is a switch that does nothing.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload to crates.io and attach binaries to the GitHub Release"
+        type: boolean
+        default: false
+
+# Read-only by default; the release job asks for what it needs.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail any build script or rustc invocation that emits a warning we asked for.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Everything that can be checked without credentials.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rust-toolchain.toml is not used here on purpose: the MSRV in
+      # Cargo.toml (`rust-version`) is what consumers are promised, so it is
+      # checked separately below rather than being the default toolchain.
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
+      # `cargo package` rewrites path dependencies to registry ones and builds
+      # the result, which is the closest local equivalent of what crates.io
+      # will do. It does not prove the dependencies are published, though --
+      # that is what the publish job's dependency wait is for.
+      - name: Package
+        run: cargo package --workspace --locked
+
+  # ---------------------------------------------------------------------------
+  # MSRV. `rust-version = "1.75"` is a promise; without this job it is only a
+  # claim in a manifest.
+  # ---------------------------------------------------------------------------
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read rust-version from the workspace manifest
+        id: msrv
+        run: |
+          set -euo pipefail
+          version=$(python3 -c '
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["workspace"]["package"]["rust-version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "MSRV is $version"
+
+      - name: Install MSRV toolchain
+        run: |
+          rustup toolchain install "${{ steps.msrv.outputs.version }}" --profile minimal
+          rustup default "${{ steps.msrv.outputs.version }}"
+
+      # --locked because the committed lockfile is what CI should resolve.
+      # `cargo build` rather than `cargo test` because the tests use nothing
+      # beyond the standard library, so building every target is enough.
+      - name: Build on MSRV
+        run: cargo build --workspace --all-targets --locked
+
+  # ---------------------------------------------------------------------------
+  # crates.io. The order below is the dependency order and is not negotiable:
+  # cargo publish resolves each dependency against the live registry, so a
+  # crate cannot be published before everything it depends on.
+  #
+  #   war3-core
+  #     ├── war3-archive
+  #     └── war3-terrain
+  #           ├── war3-meta
+  #           └── war3-map  (also needs war3-archive)
+  #                 └── war3-cli
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    needs: [ test, msrv ]
+    runs-on: ubuntu-latest
+    # `inputs` is null outside workflow_dispatch, and `!null` evaluates to true,
+    # so the event has to be named explicitly rather than inferred from the
+    # inputs alone.
+    if: >-
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' && inputs.publish == true
+    # No `environment:` here on purpose. Declaring one moves the secret into
+    # environment scope and requires that environment to exist before the first
+    # run, for a gate this project does not need yet; the token is read from
+    # Settings -> Secrets and variables -> Actions instead. To add a manual
+    # approval gate later, create the environment, add `environment: <name>`
+    # back and move the secret into it.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify the tag matches the workspace version
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          manifest_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[0].version')
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "manifest: $manifest_version"
+          echo "tag:      $tag_version"
+          if [ "$manifest_version" != "$tag_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $manifest_version"
+            echo "Bump [workspace.package] version, or retag."
+            exit 1
+          fi
+
+      # The token comes from the environment, never from a command line, so it
+      # cannot leak into a log through `cargo` echoing its arguments.
+      - name: Check the token is present
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::the CARGO_REGISTRY_TOKEN secret is empty"
+            echo "Add it under Settings -> Secrets and variables -> Actions,"
+            echo "named exactly CARGO_REGISTRY_TOKEN."
+            exit 1
+          fi
+          echo "token present (${#CARGO_REGISTRY_TOKEN} characters, not printed)"
+
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # One metadata call, reused for every lookup.
+          cargo metadata --no-deps --format-version 1 > /tmp/meta.json
+
+          version_of() {
+            jq -r --arg name "$1" '.packages[] | select(.name == $name) | .version' /tmp/meta.json
+          }
+
+          # Dependency order, and it is not negotiable: cargo publish resolves
+          # each dependency against the live registry, so a crate cannot go out
+          # before everything it depends on. war3-cli is absent on purpose -- it
+          # is a binary and ships as a GitHub Release artifact, which is what
+          # map authors want, rather than through `cargo install`.
+          order="war3-core war3-archive war3-terrain war3-meta war3-map"
+
+          # Publishing is attempted directly rather than gated behind a
+          # "is it already there?" probe, because every such probe available
+          # here lies:
+          #   - `cargo search` fuzzy-matches, so it reports unrelated and
+          #     not-yet-published crates as hits, which would skip every crate
+          #     and publish nothing while reporting success;
+          #   - `cargo info` resolves against the local workspace first and
+          #     returns 0 for a crate that was never published.
+          # The publish error itself is the only trustworthy signal, so it is
+          # what this loop branches on.
+          for crate in $order; do
+            version=$(version_of "$crate")
+            if [ -z "$version" ]; then
+              echo "::error::could not read the version of $crate from cargo metadata"
+              exit 1
+            fi
+            echo "::group::$crate $version"
+
+            # crates.io does not index an upload instantly, and cargo publish
+            # resolves dependencies against that index. Retrying on that exact
+            # error is what turns a timing problem into a wait instead of a
+            # failed release. The message looks like:
+            #   failed to select a version for the requirement `war3-core = "^0.0.2"`
+            #   candidate versions found which didn't match: 0.0.1
+            # which misleadingly points at the manifest rather than at timing.
+            attempt=0
+            max_attempts=60
+            while :; do
+              attempt=$((attempt + 1))
+              if output=$(cargo publish --locked -p "$crate" 2>&1); then
+                echo "$output"
+                echo "published $crate $version"
+                break
+              fi
+              echo "$output"
+
+              # A re-run after a partial release lands here. Not an error: the
+              # crate is already out and crates.io never allows a re-upload.
+              if grep -qi 'already uploaded\|already exists' <<<"$output"; then
+                echo "$crate $version is already on the registry, moving on"
+                break
+              fi
+
+              # Only index propagation is worth waiting for. Anything else is a
+              # real failure and should stop the release rather than burn ten
+              # minutes on retries.
+              if ! grep -qi 'failed to select a version' <<<"$output"; then
+                echo "::error::publishing $crate failed for a reason other than index propagation"
+                exit 1
+              fi
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "::error::$crate $version still cannot resolve its dependencies after $((max_attempts * 10))s"
+                exit 1
+              fi
+
+              echo "dependencies not indexed yet, retrying ($attempt/$max_attempts)"
+              sleep 10
+            done
+            echo "::endgroup::"
+          done
+
+  # ---------------------------------------------------------------------------
+  # The binary. This is the artifact most users actually want: they are map
+  # authors, not Rust developers, so `cargo install` is the wrong delivery
+  # mechanism for them.
+  # ---------------------------------------------------------------------------
+  binaries:
+    name: Build binaries
+    needs: [ publish ]
+    if: >-
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' && inputs.publish == true
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: war3-windows-x86_64.zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: war3-linux-x86_64.tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: war3-macos-x86_64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: war3-macos-aarch64.tar.gz
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked -p war3-cli --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          cd target/${{ matrix.target }}/release
+          tar czf "../../../${{ matrix.archive }}" war3
+          cd ../../..
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/war3.exe" `
+                           -DestinationPath "${{ matrix.archive }}"
+
+      - name: Upload to the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # --verify-tag makes this fail loudly if the tag is missing rather
+          # than silently creating a release from the default branch.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "${{ matrix.archive }}" --clobber
