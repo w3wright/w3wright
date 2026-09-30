@@ -1,0 +1,28 @@
+# Build output
+/target
+
+# IDE
+/.idea
+/.vscode/*.log
+*.swp
+
+# Test map samples. See examples/lost-temple/README.md for provenance.
+#
+# Map binaries are not committed, for three independent reasons:
+#   - Blizzard's own maps belong to Blizzard and cannot be redistributed;
+#   - the sample maps bundled with other projects sit inside GPL-3.0
+#     repositories, and copying them here would affect this project's licence;
+#   - community maps need the author's permission individually.
+#
+# To get a sample, place your own, or run
+# `cargo run --example make_synthetic -p war3-mpq` to generate a structurally
+# valid archive.
+*.w3x
+*.w3m
+*.w3n
+*.w3g
+!examples/**/README.md
+
+# Scratch output
+synthetic.w3x
+*.tmp

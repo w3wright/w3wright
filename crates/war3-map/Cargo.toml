@@ -1,0 +1,13 @@
+[package]
+name = "war3-map"
+description = "Map composition model and metadata-class file parsing (w3i / wts / imp). Excludes terrain and object data."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+war3-core.workspace = true
+war3-mpq.workspace = true
+war3-terrain.workspace = true

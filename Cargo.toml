@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/w3wright/w3wright"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Internal crates. `war3-cli` is the umbrella that depends on all of them;
+# none of them depends on it.
+war3-core = { path = "crates/war3-core", version = "0.0.1" }
+war3-mpq = { path = "crates/war3-mpq", version = "0.0.1" }
+war3-map = { path = "crates/war3-map", version = "0.0.1" }
+war3-terrain = { path = "crates/war3-terrain", version = "0.0.1" }
+war3-meta = { path = "crates/war3-meta", version = "0.0.1" }
+
+[profile.release]
+lto = "thin"
+strip = true

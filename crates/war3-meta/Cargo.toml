@@ -1,0 +1,15 @@
+[package]
+name = "war3-meta"
+description = "Object field metadata and trigger definitions (SYLK / INI / TXT), split into a mechanical and an expressive layer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+war3-core.workspace = true
+# Reuses the SYLK reader rather than writing a second one: SYLK is a single
+# format and should have a single parser. The cost is that this crate depends on
+# the terrain crate, which is preferable to two divergent readers.
+war3-terrain.workspace = true

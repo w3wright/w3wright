@@ -1,0 +1,10 @@
+[package]
+name = "war3-core"
+description = "Shared core types: FourCC, Vec3, diagnostics and errors. No format-specific code."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
