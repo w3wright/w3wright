@@ -19,10 +19,10 @@
 //! offset systems, sector lengths, the enumeration ladder, branch selection.
 //!
 //! ```text
-//! cargo run --example make_synthetic -p war3-mpq
+//! cargo run --example make_synthetic -p war3-archive
 //! ```
 
-use war3_mpq::{crypt_table, hash_string, HashType};
+use war3_archive::{crypt_table, hash_string, HashType};
 
 /// Encrypts 32-bit words; the exact inverse of the reader's `decrypt`.
 fn encrypt(table: &[u32; 0x500], data: &mut [u32], mut key: u32) {

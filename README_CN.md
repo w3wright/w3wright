@@ -19,7 +19,7 @@ Phase 1 覆盖 W3X 解析器：打开一张 `.w3x`，读出里面的元数据类
 | Crate | 状态 | 内容 |
 | --- | --- | --- |
 | `war3-core` | ✅ | `FourCC`、`Vec3`、错误与诊断机制、可注入资产源 |
-| `war3-mpq` | ✅ | 头扫描、表解密、哈希查找、枚举阶梯、扇区解密、自写 inflate |
+| `war3-archive` | ✅ | 暴雪归档读取：头扫描、表解密、哈希查找、枚举阶梯、扇区解密、自写 inflate |
 | `war3-map` | ✅ | `.w3i`（版本 0–33）、`.wts`、`.imp`、Map 组合模型 |
 | `war3-terrain` | ✅ | `.w3e` 的 v11 与 v12 两种布局，以及 SYLK 解析 |
 | `war3-meta` | ✅ | SYLK 元数据表与 `TriggerData.txt` 触发定义 |
@@ -68,7 +68,7 @@ w3wright/
 ├── Cargo.toml                 # 虚拟清单，members = ["crates/*"]
 ├── crates/
 │   ├── war3-core/             # FourCC / Vec3 / 错误 / 诊断 / AssetSource
-│   ├── war3-mpq/              # MPQ 读取 + 自写 inflate
+│   ├── war3-archive/          # 暴雪归档读取 + 自写 inflate
 │   ├── war3-map/              # .w3i / .wts / .imp + Map 组合模型
 │   ├── war3-terrain/          # .w3e v11 与 v12 + SYLK
 │   ├── war3-meta/             # 对象字段元数据 + 触发定义
@@ -80,12 +80,11 @@ w3wright/
 ### 依赖方向
 
 ```text
-war3-cli          ← 伞包，唯一提供二进制的包
-  ├── war3-map      → war3-terrain   （Map 模型持有地形）
-  ├── war3-terrain
-  ├── war3-meta     → war3-terrain   （复用 SYLK 解析器）
-  ├── war3-mpq
-  └── war3-core
+war3-cli  ← 伞包，唯一提供二进制的包
+  ├── war3-map  → war3-archive, war3-terrain, war3-core
+  ├── war3-meta → war3-terrain, war3-core
+  ├── war3-archive  → war3-core
+  └── war3-terrain  → war3-core
 ```
 
 `war3-cli` 依赖其他；其他包都不依赖 `war3-cli`。
@@ -117,7 +116,7 @@ war3-cli          ← 伞包，唯一提供二进制的包
 社区地图需要作者同意才能再分发。
 
 有一份样本是本地生成的：
-`cargo run --example make_synthetic -p war3-mpq` 会写出一份结构合法的 MPQ 归档 ——
+`cargo run --example make_synthetic -p war3-archive` 会写出一份结构合法的 MPQ 归档 ——
 加密的表、三种存储布局、且**故意不写 `(listfile)`**。它的作用是把"读取器写错了"
 与"这份文件特殊"分开。详见
 [`examples/lost-temple/README.md`](examples/lost-temple/README.md)。

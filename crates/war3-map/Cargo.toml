@@ -9,5 +9,5 @@ rust-version.workspace = true
 
 [dependencies]
 war3-core.workspace = true
-war3-mpq.workspace = true
+war3-archive.workspace = true
 war3-terrain.workspace = true

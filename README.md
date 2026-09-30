@@ -20,7 +20,7 @@ metadata-class and terrain-class files inside it.
 | Crate | State | Contents |
 | --- | --- | --- |
 | `war3-core` | done | `FourCC`, `Vec3`, error and diagnostic machinery, injectable asset source |
-| `war3-mpq` | done | header discovery, table decryption, hash lookup, enumeration ladder, sector decryption, hand-written inflate |
+| `war3-archive` | done | Blizzard archive reading: header discovery, table decryption, hash lookup, enumeration ladder, sector decryption, hand-written inflate |
 | `war3-map` | done | `.w3i` (versions 0–33), `.wts`, `.imp`, map composition model |
 | `war3-terrain` | done | `.w3e` in both the v11 and v12 layouts, plus a SYLK reader |
 | `war3-meta` | done | SYLK metadata tables and `TriggerData.txt` trigger definitions |
@@ -71,7 +71,7 @@ w3wright/
 ├── Cargo.toml                 # virtual manifest, members = ["crates/*"]
 ├── crates/
 │   ├── war3-core/             # FourCC / Vec3 / errors / diagnostics / AssetSource
-│   ├── war3-mpq/              # MPQ reading and a hand-written inflate
+│   ├── war3-archive/          # Blizzard archive reading + a hand-written inflate
 │   ├── war3-map/              # .w3i / .wts / .imp and the map composition model
 │   ├── war3-terrain/          # .w3e v11 and v12, plus SYLK
 │   ├── war3-meta/             # object field metadata and trigger definitions
@@ -83,12 +83,11 @@ w3wright/
 ### Dependency direction
 
 ```text
-war3-cli          <- umbrella crate, the only one producing a binary
-  ├── war3-map      -> war3-terrain   (the map model owns terrain)
-  ├── war3-terrain
-  ├── war3-meta     -> war3-terrain   (reuses the SYLK reader)
-  ├── war3-mpq
-  └── war3-core
+war3-cli  <- umbrella crate, the only one producing a binary
+  ├── war3-map  -> war3-archive, war3-terrain, war3-core
+  ├── war3-meta -> war3-terrain, war3-core
+  ├── war3-archive  -> war3-core
+  └── war3-terrain  -> war3-core
 ```
 
 `war3-cli` depends on the others; none of the others depends on `war3-cli`.
@@ -127,7 +126,7 @@ belong to Blizzard, sample maps shipped inside other projects carry their own
 licences, and community maps need the author's permission before redistribution.
 
 One sample is generated locally instead:
-`cargo run --example make_synthetic -p war3-mpq` writes a structurally valid MPQ
+`cargo run --example make_synthetic -p war3-archive` writes a structurally valid MPQ
 archive — encrypted tables, three storage layouts, and deliberately no
 `(listfile)` — which is what isolates "the reader is wrong" from "this particular
 file is unusual". See [`examples/lost-temple/README.md`](examples/lost-temple/README.md).

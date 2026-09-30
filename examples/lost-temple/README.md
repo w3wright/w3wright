@@ -24,7 +24,7 @@ against a real map that will not open gives no clue which stage is at fault. An
 archive with a known-correct answer does.
 
 ```bash
-cargo run --example make_synthetic -p war3-mpq -- examples/lost-temple/synthetic.w3x
+cargo run --example make_synthetic -p war3-archive -- examples/lost-temple/synthetic.w3x
 ```
 
 The generator writes the archive with the same crypto primitives the reader uses,
@@ -113,5 +113,5 @@ and place it in [`../fresh/`](../fresh/README.md). The commands to run and the
 criteria to judge them by are there.
 
 ```bash
-cargo run --example dump_mpq -p war3-mpq -- "<map or archive>"
+cargo run --example dump_mpq -p war3-archive -- "<map or archive>"
 ```

@@ -29,7 +29,7 @@ If the World Editor will not start, a fallback: copy a map from
 
 ```bash
 # 1. Archive structure: whether the tables decrypt is immediately visible.
-cargo run --example dump_mpq -p war3-mpq -- "examples/fresh/<map>"
+cargo run --example dump_mpq -p war3-archive -- "examples/fresh/<map>"
 
 # 2. Map parsing, the Phase 1 verb.
 cargo run -p war3-cli -- map info "examples/fresh/<map>"

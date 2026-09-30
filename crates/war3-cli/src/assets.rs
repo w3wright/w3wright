@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use war3_core::assets::normalize_asset_path;
 use war3_core::AssetSource;
-use war3_mpq::Archive;
+use war3_archive::Archive;
 
 /// Archives to try, in order.
 ///

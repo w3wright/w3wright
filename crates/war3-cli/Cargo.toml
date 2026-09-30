@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 war3-core.workspace = true
-war3-mpq.workspace = true
+war3-archive.workspace = true
 war3-map.workspace = true
 war3-terrain.workspace = true
 war3-meta.workspace = true

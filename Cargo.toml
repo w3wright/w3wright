@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/w3wright/w3wright"
@@ -12,11 +12,17 @@ rust-version = "1.75"
 [workspace.dependencies]
 # Internal crates. `war3-cli` is the umbrella that depends on all of them;
 # none of them depends on it.
-war3-core = { path = "crates/war3-core", version = "0.0.1" }
-war3-mpq = { path = "crates/war3-mpq", version = "0.0.1" }
-war3-map = { path = "crates/war3-map", version = "0.0.1" }
-war3-terrain = { path = "crates/war3-terrain", version = "0.0.1" }
-war3-meta = { path = "crates/war3-meta", version = "0.0.1" }
+#
+# The `version` key is required by publishing: without it, packaging a crate on
+# its own makes Cargo look the dependency up on crates.io instead of in this
+# workspace, and the packaged manifest fails to verify. It has to be kept in
+# step with `[workspace.package] version`; `cargo package --workspace` catches
+# it immediately when it is not.
+war3-core = { path = "crates/war3-core", version = "0.0.2" }
+war3-archive = { path = "crates/war3-archive", version = "0.0.2" }
+war3-map = { path = "crates/war3-map", version = "0.0.2" }
+war3-terrain = { path = "crates/war3-terrain", version = "0.0.2" }
+war3-meta = { path = "crates/war3-meta", version = "0.0.2" }
 
 [profile.release]
 lto = "thin"

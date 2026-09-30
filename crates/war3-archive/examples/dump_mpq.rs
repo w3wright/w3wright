@@ -5,10 +5,10 @@
 //! some hash slots unused) before any format parser is involved.
 //!
 //! ```text
-//! cargo run --example dump_mpq -p war3-mpq -- <archive>
+//! cargo run --example dump_mpq -p war3-archive -- <archive>
 //! ```
 
-use war3_mpq::archive::{self, Archive};
+use war3_archive::archive::{self, Archive};
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: dump_mpq <file>");

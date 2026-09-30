@@ -49,7 +49,7 @@ fn verbose(args: &[String]) -> bool {
 /// `war3 map info`.
 fn info(args: &[String]) -> Result<ExitCode> {
     let path = required_arg(args, 0, "a map path", "war3 map info <map>")?;
-    let archive = war3_mpq::Archive::open(path)?;
+    let archive = war3_archive::Archive::open(path)?;
     let map = Map::from_source(&archive)?;
 
     println!("map   {path}");
@@ -199,7 +199,7 @@ fn info(args: &[String]) -> Result<ExitCode> {
 /// normal, since the format does not store names.
 fn list(args: &[String]) -> Result<ExitCode> {
     let path = required_arg(args, 0, "a map path", "war3 map list <map>")?;
-    let archive = war3_mpq::Archive::open(path)?;
+    let archive = war3_archive::Archive::open(path)?;
     let info = archive.info();
 
     println!("map      {path}");
@@ -260,7 +260,7 @@ fn file(args: &[String]) -> Result<ExitCode> {
     let path = required_arg(args, 0, "a map path", "war3 map file <map> <member>")?;
     let name = required_arg(args, 1, "a member name", "war3 map file <map> <member>")?;
 
-    let archive = war3_mpq::Archive::open(path)?;
+    let archive = war3_archive::Archive::open(path)?;
     let bytes = archive
         .read_file(name)
         .map_err(|e| Error::msg(format!("could not read {name:?}: {e}")))?;
@@ -273,7 +273,7 @@ fn file(args: &[String]) -> Result<ExitCode> {
 /// `war3 map terrain`.
 fn terrain(args: &[String]) -> Result<ExitCode> {
     let path = required_arg(args, 0, "a map path", "war3 map terrain <map>")?;
-    let archive = war3_mpq::Archive::open(path)?;
+    let archive = war3_archive::Archive::open(path)?;
     let bytes = archive
         .read_file("war3map.w3e")
         .map_err(|e| Error::msg(format!("no readable war3map.w3e in this map: {e}")))?;
@@ -366,7 +366,7 @@ fn terrain(args: &[String]) -> Result<ExitCode> {
 /// `war3 map archive`: prints the container structure without parsing the map.
 fn archive(args: &[String]) -> Result<ExitCode> {
     let path = required_arg(args, 0, "a map path", "war3 map archive <map>")?;
-    let archive = war3_mpq::Archive::open(path)?;
+    let archive = war3_archive::Archive::open(path)?;
     let info = archive.info();
     let h = &info.header;
 

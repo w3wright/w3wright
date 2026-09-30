@@ -36,7 +36,7 @@ pub trait MapSource: std::fmt::Debug {
     }
 }
 
-impl MapSource for war3_mpq::Archive {
+impl MapSource for war3_archive::Archive {
     fn get(&self, name: &str) -> Option<Vec<u8>> {
         self.read_file(name).ok()
     }
@@ -161,7 +161,7 @@ impl Map {
 
         // ---- war3map.imp, optional ----
         let imports = match source.get("war3map.imp") {
-            Some(bytes) => match war3_mpq::archive::parse_imports(&bytes) {
+            Some(bytes) => match war3_archive::archive::parse_imports(&bytes) {
                 Ok(entries) => {
                     let list = ImportList::from_entries(
                         1,
@@ -211,7 +211,7 @@ impl Map {
 
     /// Opens a map from a file, through the MPQ reader.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let archive = war3_mpq::Archive::open(path)?;
+        let archive = war3_archive::Archive::open(path)?;
         let mut map = Self::from_source(&archive)?;
         // Carry over the archive's own diagnostics, such as a header that is not
         // at offset 0.
@@ -303,7 +303,7 @@ fn collect_file_list(source: &dyn MapSource) -> Vec<MapFileEntry> {
     // `MapSource` can only read by name, not enumerate; enumeration is specific
     // to the archive layer. Probing the known-names list is the most this layer
     // can do, and the CLI reads the archive directly for a full listing.
-    war3_mpq::archive::KNOWN_MEMBER_NAMES
+    war3_archive::archive::KNOWN_MEMBER_NAMES
         .iter()
         .filter_map(|name| {
             source.get(name).map(|bytes| MapFileEntry {
