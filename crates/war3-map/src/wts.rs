@@ -2,11 +2,13 @@
 //!
 //! # The format is lossy
 //!
-//! Three known problems:
+//! Four known problems:
 //!
 //! - a string containing both a comma and a double quote does not survive a write;
 //! - a string containing a closing brace does not survive a write;
-//! - strings above 256 bytes placed in a binary field crash the game.
+//! - strings above 256 bytes placed in a binary field crash the game;
+//! - the label comment that generator tools put before each value block (see
+//!   below) is not kept, so a rewrite loses it.
 //!
 //! The usual workaround replaces `}` with `|`.
 //!
@@ -16,6 +18,28 @@
 //! 2. an unterminated value block is reported and taken as ending at EOF, not
 //!    guessed at;
 //! 3. writing performs only the format's own structure, leaving values alone.
+//!
+//! # The lines between the index and the brace are a label, not the value
+//!
+//! Generator tools annotate every entry with the object it belongs to and the
+//! field it fills:
+//!
+//! ```text
+//! STRING 7
+//! // 技能: A000 (跳跃2), Name (名字)
+//! {
+//! 跳跃2
+//! }
+//! ```
+//!
+//! That comment sits **before** the opening brace. It reads like part of the
+//! block, and folding it into the value is wrong: the value is `跳跃2`, and a
+//! tooltip showing the whole comment is a visible defect. The corpus is
+//! unambiguous — of 1858 entries across 137 maps, every one carried such a
+//! prelude, none of them held anything but comments and blank lines, and not one
+//! held a comment *inside* the braces.
+//!
+//! Lines after the brace are therefore taken verbatim, comments included.
 //!
 //! Indices start at 0, and references are written as `TRIGSTR_nnn`, three digits
 //! zero-padded — though parsing accepts unpadded forms.
@@ -67,12 +91,29 @@ impl StringTable {
 
             let mut value_lines: Vec<&str> = Vec::new();
             let mut closed = false;
+            // Whether the opening brace has been seen, and whether collection has
+            // begun. They differ for a brace-less entry, which is malformed but
+            // whose text is still the author's.
+            let mut saw_brace = false;
+            let mut collecting = false;
             for inner in lines.by_ref() {
                 if inner.trim() == "}" {
                     closed = true;
                     break;
                 }
-                if inner.trim() == "{" {
+                if !collecting {
+                    if inner.trim() == "{" {
+                        saw_brace = true;
+                        collecting = true;
+                        continue;
+                    }
+                    // Every line before the brace is a label — the generator's
+                    // `// 技能: …` annotation — and never part of the value.
+                    if inner.trim().is_empty() || inner.trim().starts_with("//") {
+                        continue;
+                    }
+                    collecting = true;
+                    value_lines.push(inner);
                     continue;
                 }
                 value_lines.push(inner);
@@ -84,6 +125,15 @@ impl StringTable {
                     format!(
                         "STRING {index} has no closing brace; the value is taken as running to the \
                          end of the file"
+                    ),
+                ));
+            }
+            if !saw_brace {
+                diagnostics.push(Diagnostic::warn(
+                    DiagnosticCode::WtsMissingOpenBrace,
+                    format!(
+                        "STRING {index} has no opening brace; its value was taken as starting at \
+                         the first line that is neither blank nor a comment"
                     ),
                 ));
             }
@@ -217,6 +267,48 @@ mod tests {
         let raw = b"STRING 3\r\n{\r\nline one\r\nline two\r\n}\r\n";
         let table = StringTable::parse(raw);
         assert_eq!(table.get(3), Some("line one\nline two"));
+    }
+
+    #[test]
+    fn a_label_comment_before_the_brace_is_not_part_of_the_value() {
+        let raw = b"STRING 7\r\n// \xE6\x8A\x80\xE8\x83\xBD: A000 (\xE8\xB7\xB3\xE8\xB7\x832), Name (\xE5\x90\x8D\xE5\xAD\x97)\r\n{\r\n\xE8\xB7\xB3\xE8\xB7\x832\r\n}\r\n";
+        let table = StringTable::parse(raw);
+        assert_eq!(
+            table.get(7),
+            Some("\u{8df3}\u{8dc3}2"),
+            "the generator's label must not be folded into the value"
+        );
+        assert!(
+            !table.diagnostics().has_problems(),
+            "a label is normal, not something to warn about"
+        );
+    }
+
+    #[test]
+    fn blank_lines_before_the_brace_are_skipped_too() {
+        let raw = b"STRING 1\r\n// label\r\n\r\n// second label\r\n{\r\nvalue\r\n}\r\n";
+        let table = StringTable::parse(raw);
+        assert_eq!(table.get(1), Some("value"));
+    }
+
+    #[test]
+    fn a_comment_after_the_brace_is_kept_verbatim() {
+        // Inside the braces the text is the author's, so nothing is stripped.
+        let raw = b"STRING 1\r\n{\r\n// not a label\r\nvalue\r\n}\r\n";
+        let table = StringTable::parse(raw);
+        assert_eq!(table.get(1), Some("// not a label\nvalue"));
+    }
+
+    #[test]
+    fn a_brace_less_entry_keeps_its_text_and_says_so() {
+        let raw = b"STRING 4\r\nno brace here\r\n";
+        let table = StringTable::parse(raw);
+        assert_eq!(table.get(4), Some("no brace here"));
+        assert!(table
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|d| d.code == DiagnosticCode::WtsMissingOpenBrace));
     }
 
     #[test]

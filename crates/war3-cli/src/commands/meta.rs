@@ -118,6 +118,17 @@ fn check(args: &[String]) -> Result<ExitCode> {
         }
     }
 
+    // The `type` column holds a word, not a code; this is what turns one into
+    // the other. Printing the count makes a stale `UnitEditorData.txt` — the
+    // one in `war3.mpq` has 12 sections against the patch's 36 — visible.
+    println!(
+        "{}{:<14} {:>6} words  {} from UnitEditorData.txt sections",
+        outfmt::INDENT,
+        "type vocabulary",
+        meta.types.len(),
+        meta.types.from_sections()
+    );
+
     // ---- expressive layer ----
     outfmt::section("display text (read at runtime, not shipped)");
     for (label, rel) in [

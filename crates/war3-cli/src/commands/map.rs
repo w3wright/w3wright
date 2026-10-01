@@ -889,19 +889,10 @@ fn objects(args: &[String]) -> Result<ExitCode> {
         if let Some(set) = &metadata {
             table.diagnose_against(
                 |id| {
-                    let Some(meta_table) = set.get(kind) else {
-                        // No metadata for this category, so no judgement to make:
-                        // reporting every field as unknown would be a lie.
-                        return Some(None);
-                    };
-                    // The value's stored type is cross-checked once the
-                    // vocabulary-to-binary type mapping is settled; for now only
-                    // "is this field in the table at all" is answered.
-                    if meta_table.get(id).is_some() {
-                        Some(None)
-                    } else {
-                        None
-                    }
+                    // `Some(None)` means "known but untyped", `None` means "not
+                    // in the table at all"; reporting every field of a category
+                    // with no metadata as unknown would be a lie.
+                    set.expected_binary_type(kind, id)
                 },
                 &mut diagnostics,
             );

@@ -217,6 +217,9 @@ impl fmt::Display for MetaTable {
 pub struct MetaTableSet {
     /// One table per category.
     pub tables: BTreeMap<ObjectKind, MetaTable>,
+    /// The vocabulary-to-binary-code mapping, derived from
+    /// `UI\UnitEditorData.txt`.
+    pub types: crate::TypeRegistry,
     /// Diagnostics from loading.
     pub diagnostics: Diagnostics,
 }
@@ -261,7 +264,7 @@ impl MetaTableSet {
             .collect()
     }
 
-    /// Loads every category it can find.
+    /// Loads every category it can find, plus the type vocabulary.
     ///
     /// Categories that cannot be found are reported and skipped rather than
     /// failing, so that a user without the game installed can still parse maps.
@@ -286,7 +289,32 @@ impl MetaTableSet {
                 }
             }
         }
+
+        let editor_data = crate::EditorData::load_from_assets(source);
+        set.diagnostics.merge(&editor_data.diagnostics);
+        set.types = crate::TypeRegistry::from_editor_data(&editor_data);
+
         set
+    }
+
+    /// The binary type code the metadata expects for a field.
+    ///
+    /// `None` when the category or the field is not in the set, which is the
+    /// caller's cue that no judgement can be made.
+    #[must_use]
+    pub fn expected_binary_type(
+        &self,
+        kind: ObjectKind,
+        id: FourCC,
+    ) -> Option<Option<crate::FieldType>> {
+        let table = self.tables.get(&kind)?;
+        let field = table.get(id)?;
+        Some(
+            field
+                .type_name
+                .as_deref()
+                .map(|word| self.types.expected(word)),
+        )
     }
 }
 
@@ -434,5 +462,35 @@ C;X1;Y3;K\"atp9\";C;X2;K\"Data\";C;X3;K\"Profile\";C;X4;K-1;C;X5;K1;C;X6;K9;C;X7
         assert_eq!(set.len(), 2);
         assert_eq!(set.get(ObjectKind::Unit).unwrap().len(), 2);
         assert_eq!(set.get(ObjectKind::Item).unwrap().len(), 2);
+    }
+
+    /// Snippet shaped like `UI\UnitEditorData.txt`, plus the metadata that
+    /// refers to it by word.
+    const EDITOR_DATA: &str = "[attackBits]\n00=0,WESTRING_UE_ATTACKBITS_NONE\n\n\
+                               [weaponType]\n00=normal,WESTRING_UE_WEAPONTYPE_NORMAL\n";
+
+    #[test]
+    fn the_type_vocabulary_is_loaded_alongside_the_tables() {
+        let source = war3_core::MemoryAssetSource::new()
+            .with("Units\\UnitMetaData.slk", UNIT_META.as_bytes().to_vec())
+            .with("UI\\UnitEditorData.txt", EDITOR_DATA.as_bytes().to_vec());
+        let set = MetaTableSet::load_from_assets(&source);
+
+        assert_eq!(set.types.from_sections(), 2);
+        assert_eq!(
+            set.expected_binary_type(ObjectKind::Unit, FourCC::from_str_lossy("unam")),
+            Some(Some(crate::FieldType::String)),
+            "the `string` word is in no section, so it falls back to a string"
+        );
+        assert_eq!(
+            set.expected_binary_type(ObjectKind::Unit, FourCC::from_str_lossy("nope")),
+            None,
+            "a field that is not in the table cannot be judged"
+        );
+        assert_eq!(
+            set.expected_binary_type(ObjectKind::Buff, FourCC::from_str_lossy("unam")),
+            None,
+            "nor can a category with no metadata"
+        );
     }
 }

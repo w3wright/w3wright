@@ -83,6 +83,8 @@ pub enum DiagnosticCode {
     // ---- string table (.wts) ----
     /// An entry's value block was never closed.
     WtsUnterminatedEntry,
+    /// An entry had no opening brace, so its extent had to be inferred.
+    WtsMissingOpenBrace,
     /// A `TRIGSTR_nnn` reference points at an index the table does not have.
     WtsMissingKey,
 
@@ -101,6 +103,9 @@ pub enum DiagnosticCode {
     ObjectUnknownField,
     /// A modification's stored type disagrees with the metadata.
     ObjectTypeMismatch,
+    /// The file carries more table blocks than the two the format describes,
+    /// each of them empty.
+    ObjectExtraTable,
     /// Bytes were left over after the custom object table.
     ObjectTrailingBytes,
 
@@ -129,11 +134,13 @@ impl DiagnosticCode {
             Self::W3iTrailingBytesLeft => "w3i.trailing-bytes-left",
             Self::W3iScriptLanguageUnknown => "w3i.script-language-unknown",
             Self::WtsUnterminatedEntry => "wts.unterminated-entry",
+            Self::WtsMissingOpenBrace => "wts.missing-open-brace",
             Self::WtsMissingKey => "wts.missing-key",
             Self::DooUnknownField => "doo.unknown-field",
             Self::DooTrailingBytes => "doo.trailing-bytes",
             Self::ObjectUnknownField => "object.unknown-field",
             Self::ObjectTypeMismatch => "object.type-mismatch",
+            Self::ObjectExtraTable => "object.extra-table",
             Self::ObjectTrailingBytes => "object.trailing-bytes",
             Self::AssetFallbackUsed => "asset.fallback-used",
         }

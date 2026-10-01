@@ -20,14 +20,21 @@
 //! rather than tab-separated text. Trigger definitions come from
 //! `UI\TriggerData.txt` and `UI\TriggerStrings.txt`, which exist only in the
 //! user's installation.
+//!
+//! The `type` column of a metadata file holds a **word**, not a binary code;
+//! `UI\UnitEditorData.txt` is the registry that turns one into the other, and
+//! [`TypeRegistry`] derives it. See [`editordata`] for why it is derived rather
+//! than listed.
 
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod editordata;
 pub mod field;
 pub mod object_meta;
 pub mod trigger;
 
+pub use editordata::{EditorData, TypeRegistry, EDITOR_DATA_PATH};
 pub use field::{has_level_in_binary, FieldMeta, FieldType, ObjectKind};
 pub use object_meta::{MetaTable, MetaTableSet};
 pub use trigger::{TriggerArg, TriggerData, TriggerFunction, TriggerParam, TriggerType};

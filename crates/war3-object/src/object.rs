@@ -17,8 +17,21 @@
 //! int32 type                          // 0 int, 1 real, 2 unreal, 3 string
 //! int32 level; int32 dataIndicator    // only for the levelled kinds, see below
 //! value                               // 4 / 4 / NUL-terminated bytes
-//! 4 bytes                             // trailing, ignored by the game
+//! 4 bytes                             // end token, ignored by the game
 //! ```
+//!
+//! # The table block repeats, and the number of repetitions varies
+//!
+//! The published layout says the `count` plus entries block appears "1 or 2
+//! times (must check if EOF)", so a reader that always consumes exactly two is
+//! reading a guess rather than the format. Real files do carry a third: 11
+//! members across four maps in the corpus end with one more `int32`, always
+//! zero — an extra table with no entries. Those bytes used to be reported as
+//! unexplained trailing data.
+//!
+//! The count of tables is not modelled, because an empty table carries nothing;
+//! a writer that emits two is writing a valid file. An extra table that is *not*
+//! empty is still reported, since that would be data this build cannot place.
 //!
 //! # The two rules that are easy to miss
 //!
@@ -56,31 +69,11 @@ const MAX_COUNT: i32 = 1 << 20;
 const MOD_TAIL_LEN: usize = 4;
 
 /// The binary type of a modification's value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FieldType {
-    /// A 32-bit integer.
-    Integer,
-    /// A 32-bit float in a free range.
-    Real,
-    /// A 32-bit float constrained to `0.0 ..= 1.0`.
-    Unreal,
-    /// A NUL-terminated string; `TRIGSTR_nnn` references belong here.
-    String,
-}
-
-impl FieldType {
-    /// The type a binary type code names, if this build knows it.
-    #[must_use]
-    pub const fn from_code(code: i32) -> Option<Self> {
-        match code {
-            0 => Some(Self::Integer),
-            1 => Some(Self::Real),
-            2 => Some(Self::Unreal),
-            3 => Some(Self::String),
-            _ => None,
-        }
-    }
-}
+///
+/// Re-exported from `war3-meta` rather than defined here: the metadata layer
+/// needs the same four codes to say what it *expects*, and two enums for one
+/// on-disk field is how they drift apart.
+pub use war3_meta::FieldType;
 
 /// A modification's value.
 #[derive(Debug, Clone, PartialEq)]
@@ -249,7 +242,7 @@ impl ObjectTable {
                     )),
                     Some(Some(expected)) => {
                         let actual = value_type(&m.value);
-                        if expected != actual {
+                        if !codes_agree(expected, actual) {
                             diagnostics.push(Diagnostic::warn(
                                 DiagnosticCode::ObjectTypeMismatch,
                                 format!(
@@ -275,6 +268,34 @@ pub const fn value_type(value: &FieldValue) -> FieldType {
         FieldValue::Real(_) => FieldType::Real,
         FieldValue::Unreal(_) => FieldType::Unreal,
         FieldValue::String(_) => FieldType::String,
+    }
+}
+
+/// Whether a stored type satisfies what the metadata expects.
+///
+/// # Why `int` and `unreal` are not a mismatch
+///
+/// Both occupy four bytes and both hold a number; they differ in how those four
+/// bytes are read. The metadata's `type` word describes the **editor widget**,
+/// and for a handful of fields that widget is an integer while the underlying
+/// SLK column is a real.
+///
+/// Measured: across 117 object files and 322,107 modifications, every single
+/// disagreement between the vocabulary-derived code and the stored code is of
+/// this one shape — `udef` (Defense), `udup` (Defense Upgrade Amount) and the
+/// item `Idef` are declared `int` and stored as `unreal`, 2,041 times. Treating
+/// that as damage would mean warning on correct maps.
+///
+/// Anything else — a number where a string is promised, a string where a number
+/// is promised — is a real disagreement and is reported.
+#[must_use]
+pub const fn codes_agree(expected: FieldType, actual: FieldType) -> bool {
+    use FieldType::{Integer, Unreal};
+    match (expected, actual) {
+        // Four bytes holding a number, read two ways: a widget difference, not
+        // damage.
+        (Integer | Unreal, Integer | Unreal) => true,
+        _ => expected.code() == actual.code(),
     }
 }
 
@@ -320,12 +341,36 @@ impl ObjectFile {
         let custom = reader.table("custom", levelled, true)?;
 
         let mut diagnostics = Diagnostics::new();
+
+        // The format allows a varying number of table blocks. A trailing run of
+        // zero words is that many empty tables: a zero count with no entries
+        // carries no data, so nothing can be lost by accepting it. Anything
+        // else is reported below.
+        let left = reader.remaining();
+        let tail = reader.take(left)?;
+        let mut extra_tables = 0usize;
+        if !tail.is_empty() && tail.len() % 4 == 0 && tail.iter().all(|&b| b == 0) {
+            extra_tables = tail.len() / 4;
+        } else {
+            // Not a table block. Put it back so the report names the offset.
+            reader.seek(reader.len() - tail.len());
+        }
+        if extra_tables > 0 {
+            diagnostics.push(Diagnostic::info(
+                DiagnosticCode::ObjectExtraTable,
+                format!(
+                    "{extra_tables} empty table(s) follow the custom table; the format allows a \
+                     varying number of tables and these hold no entries"
+                ),
+            ));
+        }
+
         if reader.remaining() != 0 {
             diagnostics.push(Diagnostic::warn(
                 DiagnosticCode::ObjectTrailingBytes,
                 format!(
-                    "{} bytes follow the custom table; they are not part of the format as \
-                     documented, so the parse may be incomplete",
+                    "{} bytes follow the last table and are not an empty table; they are not part \
+                     of the format as documented, so the parse may be incomplete",
                     reader.remaining()
                 ),
             ));
@@ -353,6 +398,14 @@ impl<'a> Reader<'a> {
 
     const fn remaining(&self) -> usize {
         self.bytes.len().saturating_sub(self.pos)
+    }
+
+    const fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    const fn seek(&mut self, pos: usize) {
+        self.pos = pos;
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], ParseError> {
@@ -479,20 +532,20 @@ impl<'a> Reader<'a> {
             } else {
                 None
             };
-            let Some(field_type) = FieldType::from_code(code) else {
-                return Err(ParseError::BadField {
-                    field: "modification type",
-                    reason: format!(
-                        "object {object}, field {field:?} at offset {start} has type code {code}; \
-                         only 0, 1, 2 and 3 are known"
-                    ),
-                });
-            };
-            let value = match field_type {
+            let value = match FieldType::from_code(code) {
                 FieldType::Integer => FieldValue::Integer(self.i32()?),
                 FieldType::Real => FieldValue::Real(self.f32()?),
                 FieldType::Unreal => FieldValue::Unreal(self.f32()?),
                 FieldType::String => FieldValue::String(self.cstr()?),
+                FieldType::Unknown(code) => {
+                    return Err(ParseError::BadField {
+                        field: "modification type",
+                        reason: format!(
+                            "object {object}, field {field:?} at offset {start} has type code \
+                             {code}; only 0, 1, 2 and 3 are known"
+                        ),
+                    });
+                }
             };
             self.take(MOD_TAIL_LEN)?;
             mods.push(Modification {
@@ -528,6 +581,16 @@ mod tests {
         b.extend_from_slice(&3i32.to_le_bytes());
         b.extend_from_slice(value.as_bytes());
         b.push(0);
+        b.extend_from_slice(&[0u8; MOD_TAIL_LEN]);
+        b
+    }
+
+    /// A modification with an explicit stored type code and raw value bytes.
+    fn mod_raw(field: &[u8; 4], code: i32, value: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(field);
+        b.extend_from_slice(&code.to_le_bytes());
+        b.extend_from_slice(value);
         b.extend_from_slice(&[0u8; MOD_TAIL_LEN]);
         b
     }
@@ -764,6 +827,65 @@ mod tests {
     }
 
     #[test]
+    fn a_number_where_a_string_is_declared_is_a_mismatch() {
+        let bytes = file(
+            2,
+            &[],
+            &[object(
+                b"hpea",
+                b"h000",
+                &[mod_raw(b"unam", 0, &7i32.to_le_bytes())],
+            )],
+        );
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        let mut diagnostics = Diagnostics::new();
+        parsed
+            .table
+            .diagnose_against(|_| Some(Some(FieldType::String)), &mut diagnostics);
+        assert!(diagnostics
+            .items()
+            .iter()
+            .any(|d| d.code == DiagnosticCode::ObjectTypeMismatch));
+    }
+
+    #[test]
+    fn an_integer_where_unreal_is_declared_is_not_a_mismatch() {
+        // Measured: `udef`/`udup`/`Idef` are declared `int` in the metadata and
+        // stored as `unreal` in 2,041 modifiers across the corpus. Warning on
+        // that would mean warning on correct maps.
+        assert!(codes_agree(FieldType::Integer, FieldType::Unreal));
+        assert!(codes_agree(FieldType::Unreal, FieldType::Integer));
+        assert!(codes_agree(FieldType::Integer, FieldType::Integer));
+
+        let bytes = file(
+            2,
+            &[],
+            &[object(
+                b"hpea",
+                b"h000",
+                &[mod_raw(b"udef", 2, &2.5f32.to_le_bytes())],
+            )],
+        );
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        let mut diagnostics = Diagnostics::new();
+        parsed
+            .table
+            .diagnose_against(|_| Some(Some(FieldType::Integer)), &mut diagnostics);
+        assert!(
+            diagnostics.is_empty(),
+            "int versus unreal is a widget difference, not damage: {:?}",
+            diagnostics.items()
+        );
+    }
+
+    #[test]
+    fn a_real_is_not_tolerated_against_a_string() {
+        assert!(!codes_agree(FieldType::Real, FieldType::String));
+        assert!(!codes_agree(FieldType::Real, FieldType::Unreal));
+        assert!(!codes_agree(FieldType::Unknown(9), FieldType::Integer));
+    }
+
+    #[test]
     fn trailing_bytes_are_reported() {
         let mut bytes = file(2, &[], &[]);
         bytes.extend_from_slice(&[0xAB; 4]);
@@ -774,6 +896,55 @@ mod tests {
             .items()
             .iter()
             .any(|d| d.code == DiagnosticCode::ObjectTrailingBytes));
+    }
+
+    #[test]
+    fn an_extra_empty_table_is_accepted_and_not_a_warning() {
+        // Four maps in the corpus end with one more `int32`, always zero: a
+        // third table with no entries. It is valid, so it must not be reported
+        // as unexplained data.
+        let mut bytes = file(2, &[], &[]);
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert!(parsed.table.is_empty());
+        let codes: Vec<_> = parsed.diagnostics.items().iter().map(|d| d.code).collect();
+        assert!(
+            !codes.contains(&DiagnosticCode::ObjectTrailingBytes),
+            "an empty extra table is part of the format: {codes:?}"
+        );
+        assert!(codes.contains(&DiagnosticCode::ObjectExtraTable));
+        assert!(!parsed.diagnostics.has_problems(), "info is not a problem");
+    }
+
+    #[test]
+    fn two_extra_empty_tables_are_both_counted() {
+        let mut bytes = file(2, &[], &[]);
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        let info = parsed
+            .diagnostics
+            .items()
+            .iter()
+            .find(|d| d.code == DiagnosticCode::ObjectExtraTable)
+            .expect("the extra tables are reported");
+        assert!(info.message.contains('2'), "{}", info.message);
+    }
+
+    #[test]
+    fn an_extra_table_that_is_not_empty_is_still_a_warning() {
+        // A non-zero count means entries this build cannot place, so the bytes
+        // must be reported rather than swallowed as an empty table.
+        let mut bytes = file(2, &[], &[]);
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        let codes: Vec<_> = parsed.diagnostics.items().iter().map(|d| d.code).collect();
+        assert!(
+            codes.contains(&DiagnosticCode::ObjectTrailingBytes),
+            "{codes:?}"
+        );
+        assert!(!codes.contains(&DiagnosticCode::ObjectExtraTable));
     }
 
     #[test]
