@@ -1,0 +1,12 @@
+[package]
+name = "war3-object"
+description = "Warcraft III object data (.w3u and the other object files)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+war3-core = { workspace = true }
+war3-meta = { workspace = true }

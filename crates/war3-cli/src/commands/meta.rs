@@ -18,31 +18,9 @@ use std::process::ExitCode;
 use war3_core::{AssetSource, Error, FileAssetSource, Result};
 use war3_meta::{MetaTableSet, ObjectKind, TriggerData};
 
-use crate::assets::MpqAssetSource;
+use crate::assets::{LayeredSource, MpqAssetSource};
 use crate::cli::required_arg;
 use crate::outfmt;
-
-/// Two asset chains, archive first and loose files second.
-///
-/// A dedicated type so that the ordering is defined in exactly one place;
-/// reversing it would not fail, it would quietly read a different copy.
-#[derive(Debug)]
-struct LayeredSource<'a> {
-    first: &'a MpqAssetSource,
-    second: &'a FileAssetSource,
-}
-
-impl<'a> LayeredSource<'a> {
-    const fn new(first: &'a MpqAssetSource, second: &'a FileAssetSource) -> Self {
-        Self { first, second }
-    }
-}
-
-impl AssetSource for LayeredSource<'_> {
-    fn get(&self, path: &str) -> Option<Vec<u8>> {
-        self.first.get(path).or_else(|| self.second.get(path))
-    }
-}
 
 const USAGE: &str = "\
 USAGE:

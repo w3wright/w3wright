@@ -93,6 +93,17 @@ pub enum DiagnosticCode {
     /// Bytes were left over after the last `.doo` record.
     DooTrailingBytes,
 
+    // ---- object data (.w3u and friends) ----
+    /// A modification's field id is not in the metadata table.
+    ///
+    /// YDWE drops these silently; here the value is kept and reported, because a
+    /// dropped modification is indistinguishable from one that never existed.
+    ObjectUnknownField,
+    /// A modification's stored type disagrees with the metadata.
+    ObjectTypeMismatch,
+    /// Bytes were left over after the custom object table.
+    ObjectTrailingBytes,
+
     // ---- assets ----
     /// A display name degraded to a key name or raw identifier.
     AssetFallbackUsed,
@@ -121,6 +132,9 @@ impl DiagnosticCode {
             Self::WtsMissingKey => "wts.missing-key",
             Self::DooUnknownField => "doo.unknown-field",
             Self::DooTrailingBytes => "doo.trailing-bytes",
+            Self::ObjectUnknownField => "object.unknown-field",
+            Self::ObjectTypeMismatch => "object.type-mismatch",
+            Self::ObjectTrailingBytes => "object.trailing-bytes",
             Self::AssetFallbackUsed => "asset.fallback-used",
         }
     }

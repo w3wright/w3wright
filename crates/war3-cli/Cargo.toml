@@ -17,3 +17,4 @@ war3-archive.workspace = true
 war3-map.workspace = true
 war3-terrain.workspace = true
 war3-meta.workspace = true
+war3-object.workspace = true

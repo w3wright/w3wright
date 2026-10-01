@@ -23,6 +23,7 @@ COMMANDS:
   map terrain <map>          print terrain statistics
   map doodads <map>          print the placed doodads
   map units <map>            print the placed units and items
+  map objects <map>          print the map's object data
   map archive <map>          print MPQ archive structure
   map rebuild <in> <out>     rewrite an archive with this workspace's writer
   meta check <game-dir>      check whether metadata and trigger definitions are findable
@@ -116,6 +117,7 @@ mod tests {
             "map terrain",
             "map doodads",
             "map units",
+            "map objects",
             "map archive",
             "map rebuild",
             "meta check",

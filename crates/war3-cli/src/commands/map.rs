@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use war3_core::diag::{Diagnostic, DiagnosticCode, Diagnostics};
 use war3_core::{Error, Result};
-use war3_map::Map;
+use war3_map::{Map, MapSource};
 
 use crate::cli::required_arg;
 use crate::outfmt;
@@ -17,6 +17,8 @@ USAGE:
   war3 map terrain <map> [--verbose]         terrain statistics
   war3 map doodads <map>                     placed doodads
   war3 map units <map>                       placed units and items
+  war3 map objects <map> [--game-dir <dir>]  object data, named via the metadata
+                                             when a game directory is given
   war3 map archive <map>                     MPQ archive structure
   war3 map rebuild <in> <out> [options]      rewrite the archive with our writer
                                              --stored       re-encode members we can decode
@@ -38,6 +40,7 @@ pub fn run(args: &[String]) -> Result<ExitCode> {
         "terrain" => terrain(rest),
         "doodads" => doodads(rest),
         "units" => units(rest),
+        "objects" => objects(rest),
         "archive" => archive(rest),
         "rebuild" => rebuild(rest),
         "-h" | "--help" | "help" => {
@@ -802,6 +805,171 @@ fn units(args: &[String]) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// `war3 map objects`: the map's object data, one file per category.
+///
+/// Field ids are meaningless without Blizzard's metadata tables, which live in
+/// the game's archives rather than the map, so `--game-dir` is what turns
+/// `uhpm` into a readable name. Without it the ids and values are still shown:
+/// a user with no installation must not be left with nothing.
+fn objects(args: &[String]) -> Result<ExitCode> {
+    let path = required_arg(
+        args,
+        0,
+        "a map path",
+        "war3 map objects <map> [--game-dir <dir>]",
+    )?;
+    let game_dir = args
+        .iter()
+        .position(|a| a == "--game-dir")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+
+    let archive = war3_archive::Archive::open(path)?;
+    let metadata = game_dir.as_deref().map(|dir| {
+        let mpq = crate::assets::MpqAssetSource::open(dir);
+        let loose = war3_core::FileAssetSource::new(dir);
+        let layered = crate::assets::LayeredSource::new(&mpq, &loose);
+        war3_meta::MetaTableSet::load_from_assets(&layered)
+    });
+
+    println!("objects  {path}");
+    println!("{}", "=".repeat(60));
+    if metadata.is_none() {
+        println!(
+            "{}no --game-dir given, so field ids are shown unresolved",
+            outfmt::INDENT
+        );
+    }
+
+    let mut diagnostics = Diagnostics::new();
+    let mut parsed_any = false;
+    for kind in war3_object::ObjectKind::ALL {
+        let Some(bytes) = archive.get(kind.map_file()) else {
+            continue;
+        };
+        parsed_any = true;
+        let file = match war3_object::ObjectFile::parse(kind, &bytes) {
+            Ok(file) => file,
+            Err(e) => {
+                diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::ObjectUnknownField,
+                    format!("{} failed to parse: {e}", kind.map_file()),
+                ));
+                continue;
+            }
+        };
+        diagnostics.merge(&file.diagnostics);
+
+        let table = &file.table;
+        outfmt::section(&format!(
+            "{} ({})",
+            kind.map_file(),
+            format!("{kind:?}").to_lowercase()
+        ));
+        outfmt::field("version", file.version, 20);
+        outfmt::field(
+            "objects",
+            format!(
+                "{} original, {} custom",
+                table.original.len(),
+                table.custom.len()
+            ),
+            20,
+        );
+
+        if let Some(set) = &metadata {
+            table.diagnose_against(
+                |id| {
+                    let Some(meta_table) = set.get(kind) else {
+                        // No metadata for this category, so no judgement to make:
+                        // reporting every field as unknown would be a lie.
+                        return Some(None);
+                    };
+                    // The value's stored type is cross-checked once the
+                    // vocabulary-to-binary type mapping is settled; for now only
+                    // "is this field in the table at all" is answered.
+                    if meta_table.get(id).is_some() {
+                        Some(None)
+                    } else {
+                        None
+                    }
+                },
+                &mut diagnostics,
+            );
+        }
+
+        for object in table.custom.iter().take(6) {
+            println!(
+                "{}{} <- {}{}",
+                outfmt::INDENT,
+                object.id,
+                object.base_id,
+                if object.is_hero(kind) { "  (hero)" } else { "" }
+            );
+            print_modifications(object, kind, metadata.as_ref());
+        }
+        for object in table.original.iter().take(3) {
+            println!("{}{} (modified original)", outfmt::INDENT, object.id);
+            print_modifications(object, kind, metadata.as_ref());
+        }
+    }
+
+    if !parsed_any {
+        println!("{}no object files in this map", outfmt::INDENT);
+    }
+
+    let has_problems = outfmt::diagnostics(&diagnostics, verbose(args));
+    Ok(if has_problems {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Prints one object's modifications, naming fields when metadata is available.
+fn print_modifications(
+    object: &war3_object::Object,
+    kind: war3_object::ObjectKind,
+    metadata: Option<&war3_meta::MetaTableSet>,
+) {
+    for m in object.modifications.iter().take(12) {
+        let level = m.level.map(|l| l.level).unwrap_or(0);
+        let name = metadata
+            .and_then(|set| set.get(kind))
+            .and_then(|table| table.get(m.field))
+            .map_or_else(
+                || format!("{}", m.field),
+                |meta| {
+                    // A levelled field's readable name carries its level, e.g.
+                    // `Ilif` at level 2 is `Ilif2`.
+                    if level > 0 {
+                        meta.level_field_name(level)
+                    } else {
+                        meta.field.clone()
+                    }
+                },
+            );
+        println!(
+            "{}{:<28} = {}{}",
+            outfmt::INDENT.repeat(2),
+            name,
+            m.value,
+            if m.level.is_some() {
+                format!("   (level {level})")
+            } else {
+                String::new()
+            }
+        );
+    }
+    if object.modifications.len() > 12 {
+        println!(
+            "{}... {} more fields",
+            outfmt::INDENT.repeat(2),
+            object.modifications.len() - 12
+        );
+    }
 }
 
 /// `war3 map archive`: prints the container structure without parsing the map.

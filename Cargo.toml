@@ -23,6 +23,7 @@ war3-archive = { path = "crates/war3-archive", version = "0.0.2" }
 war3-map = { path = "crates/war3-map", version = "0.0.2" }
 war3-terrain = { path = "crates/war3-terrain", version = "0.0.2" }
 war3-meta = { path = "crates/war3-meta", version = "0.0.2" }
+war3-object = { path = "crates/war3-object", version = "0.0.2" }
 
 [profile.release]
 lto = "thin"

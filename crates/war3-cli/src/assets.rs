@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use war3_archive::Archive;
 use war3_core::assets::normalize_asset_path;
-use war3_core::AssetSource;
+use war3_core::{AssetSource, FileAssetSource};
 
 /// Archives to try, in order.
 ///
@@ -32,6 +32,31 @@ const ARCHIVE_NAMES: &[&str] = &[
     "War3Patch.mpq",
     "war3local.mpq",
 ];
+
+/// Loose files over archives, or the other way round.
+///
+/// A dedicated type so that the ordering is defined in exactly one place:
+/// reversing it would not fail, it would quietly read a different copy. The
+/// archives come first because a patch archive overrides the loose tree.
+#[derive(Debug)]
+pub struct LayeredSource<'a> {
+    first: &'a MpqAssetSource,
+    second: &'a FileAssetSource,
+}
+
+impl<'a> LayeredSource<'a> {
+    /// Layers `first` over `second`.
+    #[must_use]
+    pub const fn new(first: &'a MpqAssetSource, second: &'a FileAssetSource) -> Self {
+        Self { first, second }
+    }
+}
+
+impl AssetSource for LayeredSource<'_> {
+    fn get(&self, path: &str) -> Option<Vec<u8>> {
+        self.first.get(path).or_else(|| self.second.get(path))
+    }
+}
 
 /// A chain of MPQ archives queried in order.
 #[derive(Debug)]

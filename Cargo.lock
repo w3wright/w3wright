@@ -17,6 +17,7 @@ dependencies = [
  "war3-core",
  "war3-map",
  "war3-meta",
+ "war3-object",
  "war3-terrain",
 ]
 
@@ -39,6 +40,14 @@ version = "0.0.2"
 dependencies = [
  "war3-core",
  "war3-terrain",
+]
+
+[[package]]
+name = "war3-object"
+version = "0.0.2"
+dependencies = [
+ "war3-core",
+ "war3-meta",
 ]
 
 [[package]]
