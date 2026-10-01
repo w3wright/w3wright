@@ -833,6 +833,13 @@ fn objects(args: &[String]) -> Result<ExitCode> {
         let layered = crate::assets::LayeredSource::new(&mpq, &loose);
         war3_meta::MetaTableSet::load_from_assets(&layered)
     });
+    // String-valued fields whose metadata marks them `stringExt` hold
+    // `TRIGSTR_nnn` references, which only the map's own string table can
+    // resolve. A map whose `.wts` cannot be read (it may be imploded) simply
+    // leaves them as references.
+    let strings = archive
+        .get("war3map.wts")
+        .map(|bytes| war3_map::StringTable::parse(&bytes));
 
     println!("objects  {path}");
     println!("{}", "=".repeat(60));
@@ -908,11 +915,23 @@ fn objects(args: &[String]) -> Result<ExitCode> {
                 object.base_id,
                 if object.is_hero(kind) { "  (hero)" } else { "" }
             );
-            print_modifications(object, kind, metadata.as_ref());
+            print_modifications(
+                object,
+                kind,
+                metadata.as_ref(),
+                strings.as_ref(),
+                &mut diagnostics,
+            );
         }
         for object in table.original.iter().take(3) {
             println!("{}{} (modified original)", outfmt::INDENT, object.id);
-            print_modifications(object, kind, metadata.as_ref());
+            print_modifications(
+                object,
+                kind,
+                metadata.as_ref(),
+                strings.as_ref(),
+                &mut diagnostics,
+            );
         }
     }
 
@@ -933,29 +952,34 @@ fn print_modifications(
     object: &war3_object::Object,
     kind: war3_object::ObjectKind,
     metadata: Option<&war3_meta::MetaTableSet>,
+    strings: Option<&war3_map::StringTable>,
+    diagnostics: &mut Diagnostics,
 ) {
     for m in object.modifications.iter().take(12) {
-        let level = m.level.map(|l| l.level).unwrap_or(0);
-        let name = metadata
+        let meta = metadata
             .and_then(|set| set.get(kind))
-            .and_then(|table| table.get(m.field))
-            .map_or_else(
-                || format!("{}", m.field),
-                |meta| {
-                    // A levelled field's readable name carries its level, e.g.
-                    // `Ilif` at level 2 is `Ilif2`.
-                    if level > 0 {
-                        meta.level_field_name(level)
-                    } else {
-                        meta.field.clone()
-                    }
-                },
-            );
+            .and_then(|table| table.get(m.field));
+        let level = m.level.map(|l| l.level).unwrap_or(0);
+        let name = match meta {
+            // A levelled field's readable name carries its level, e.g. `Ilif`
+            // at level 2 is `Ilif2`.
+            Some(meta) if level > 0 => meta.level_field_name(level),
+            Some(meta) => meta.field.clone(),
+            None => m.field.to_string(),
+        };
+        // A string field the metadata marks `stringExt` may hold a `TRIGSTR_nnn`
+        // reference; the map's own table is what turns it into text.
+        let value = match (&m.value, meta) {
+            (war3_object::FieldValue::String(text), Some(meta)) if meta.string_ext => {
+                strings.map_or_else(|| text.clone(), |table| table.resolve(text, diagnostics))
+            }
+            _ => m.value.to_string(),
+        };
         println!(
             "{}{:<28} = {}{}",
             outfmt::INDENT.repeat(2),
             name,
-            m.value,
+            value,
             if m.level.is_some() {
                 format!("   (level {level})")
             } else {
