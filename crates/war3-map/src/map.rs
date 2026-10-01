@@ -21,7 +21,9 @@ use std::path::Path;
 use war3_core::diag::Diagnostics;
 use war3_core::{Error, ParseError, Result};
 
+use crate::doodads::DoodadFile;
 use crate::imports::ImportList;
+use crate::units::UnitFile;
 use crate::w3i::MapInfo;
 use crate::wts::StringTable;
 
@@ -109,6 +111,11 @@ pub struct Map {
     pub imports: ImportList,
     /// Terrain, absent when the map has no `.w3e`.
     pub terrain: Option<war3_terrain::Terrain>,
+    /// Placed doodads, absent when the map has no readable `war3map.doo`.
+    pub doodads: Option<DoodadFile>,
+    /// Placed units and items, absent when the map has no readable
+    /// `war3mapUnits.doo`.
+    pub units: Option<UnitFile>,
     /// Member list with sizes, for `map list`.
     pub files: Vec<MapFileEntry>,
     /// All diagnostics, including those from sub-parsers.
@@ -202,6 +209,45 @@ impl Map {
 
         let files = collect_file_list(source);
 
+        // ---- war3map.doo and war3mapUnits.doo, both optional ----
+        //
+        // These are diagnosed rather than fatal, like the terrain: a map whose
+        // units cannot be read is still a map, and the reader is expected to
+        // report a layout it does not know rather than produce plausible
+        // nonsense. See `units`' module docs for the one known case.
+        let doodads = match source.get("war3map.doo") {
+            Some(bytes) => match DoodadFile::parse(&bytes) {
+                Ok(file) => {
+                    diagnostics.merge(&file.diagnostics);
+                    Some(file)
+                }
+                Err(e) => {
+                    diagnostics.push(war3_core::Diagnostic::error(
+                        war3_core::DiagnosticCode::DooUnknownField,
+                        format!("war3map.doo failed to parse; doodads skipped: {e}"),
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+        let units = match source.get("war3mapUnits.doo") {
+            Some(bytes) => match UnitFile::parse(&bytes) {
+                Ok(file) => {
+                    diagnostics.merge(&file.diagnostics);
+                    Some(file)
+                }
+                Err(e) => {
+                    diagnostics.push(war3_core::Diagnostic::error(
+                        war3_core::DiagnosticCode::DooUnknownField,
+                        format!("war3mapUnits.doo failed to parse; units skipped: {e}"),
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+
         // ---- resolve TRIGSTR_ references in the metadata ----
         let mut metadata = metadata;
         resolve_metadata_strings(&mut metadata, &strings, &mut diagnostics);
@@ -211,6 +257,8 @@ impl Map {
             strings,
             imports,
             terrain,
+            doodads,
+            units,
             files,
             diagnostics,
         })
@@ -236,6 +284,18 @@ impl Map {
     #[must_use]
     pub const fn has_terrain(&self) -> bool {
         self.terrain.is_some()
+    }
+
+    /// How many doodads were read, if the file parsed.
+    #[must_use]
+    pub fn doodad_count(&self) -> Option<usize> {
+        self.doodads.as_ref().map(|d| d.doodads.len())
+    }
+
+    /// How many units and items were read, if the file parsed.
+    #[must_use]
+    pub fn unit_count(&self) -> Option<usize> {
+        self.units.as_ref().map(|u| u.units.len())
     }
 }
 

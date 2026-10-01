@@ -15,6 +15,8 @@ USAGE:
   war3 map list <map>                        files inside the map
   war3 map file <map> <member>               write one member file
   war3 map terrain <map> [--verbose]         terrain statistics
+  war3 map doodads <map>                     placed doodads
+  war3 map units <map>                       placed units and items
   war3 map archive <map>                     MPQ archive structure
   war3 map rebuild <in> <out> [options]      rewrite the archive with our writer
                                              --stored       re-encode members we can decode
@@ -34,6 +36,8 @@ pub fn run(args: &[String]) -> Result<ExitCode> {
         "list" => list(rest),
         "file" => file(rest),
         "terrain" => terrain(rest),
+        "doodads" => doodads(rest),
+        "units" => units(rest),
         "archive" => archive(rest),
         "rebuild" => rebuild(rest),
         "-h" | "--help" | "help" => {
@@ -114,6 +118,31 @@ fn info(args: &[String]) -> Result<ExitCode> {
             20,
         );
     }
+
+    outfmt::section("placement");
+    // "the map has no such member" and "the member would not parse" are
+    // different facts, and the second one has a diagnostic explaining it.
+    let describe = |member: &str, count: Option<usize>| match count {
+        Some(n) => n.to_string(),
+        None => {
+            let failed = map
+                .diagnostics
+                .items()
+                .iter()
+                .any(|d| d.message.contains(member));
+            if failed {
+                "unreadable, see diagnostics".to_string()
+            } else {
+                "none".to_string()
+            }
+        }
+    };
+    outfmt::field("doodads", describe("war3map.doo", map.doodad_count()), 20);
+    outfmt::field(
+        "units and items",
+        describe("war3mapUnits.doo", map.unit_count()),
+        20,
+    );
 
     outfmt::section("terrain");
     outfmt::field(
@@ -589,6 +618,185 @@ fn terrain(args: &[String]) -> Result<ExitCode> {
     outfmt::field("map edge (0x4000)", pct(counts.boundary_1), 22);
 
     let has_problems = outfmt::diagnostics(&terrain.diagnostics, verbose(args));
+    Ok(if has_problems {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// `war3 map doodads`: the doodads placed on the map.
+fn doodads(args: &[String]) -> Result<ExitCode> {
+    let path = required_arg(args, 0, "a map path", "war3 map doodads <map>")?;
+    let map = Map::from_source(&war3_archive::Archive::open(path)?)?;
+    let Some(file) = &map.doodads else {
+        // Say why rather than printing an empty list.
+        let reason = map
+            .diagnostics
+            .items()
+            .iter()
+            .find(|d| d.message.contains("war3map.doo"))
+            .map_or_else(
+                || "the map has no war3map.doo".to_string(),
+                |d| d.message.clone(),
+            );
+        return Err(Error::msg(format!("doodads unavailable: {reason}")));
+    };
+
+    println!("doodads  {path}");
+    println!("{}", "=".repeat(60));
+    outfmt::field(
+        "file version",
+        format!("v{}/sub{}", file.version, file.subversion),
+        20,
+    );
+    outfmt::field("records", file.doodads.len(), 20);
+    let mut kinds = std::collections::BTreeMap::new();
+    for d in &file.doodads {
+        *kinds.entry(d.kind.to_string()).or_insert(0usize) += 1;
+    }
+    outfmt::field("distinct types", kinds.len(), 20);
+    outfmt::field("special doodads", file.special.len(), 20);
+
+    outfmt::section("most common types");
+    let mut ranked: Vec<_> = kinds.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (kind, count) in ranked.iter().take(12) {
+        outfmt::field(kind, count, 20);
+    }
+
+    outfmt::section("first records");
+    println!(
+        "{}{:<6} {:>4}  {:<24} {:<20} {:>4} {:>10}",
+        outfmt::INDENT,
+        "type",
+        "var",
+        "position",
+        "flags",
+        "life",
+        "editor"
+    );
+    for d in file.doodads.iter().take(20) {
+        println!(
+            "{}{:<6} {:>4}  ({:>8.1},{:>8.1},{:>7.1})  {:<20} {:>3}% {:>10}",
+            outfmt::INDENT,
+            d.kind,
+            d.variation,
+            d.position.x,
+            d.position.y,
+            d.position.z,
+            war3_map::DoodadFile::flags_name(d.flags),
+            d.life,
+            d.editor_id
+        );
+    }
+    if file.doodads.len() > 20 {
+        println!("{}... {} more", outfmt::INDENT, file.doodads.len() - 20);
+    }
+
+    let has_problems = outfmt::diagnostics(&map.diagnostics, verbose(args));
+    Ok(if has_problems {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// `war3 map units`: the units and items placed on the map.
+fn units(args: &[String]) -> Result<ExitCode> {
+    let path = required_arg(args, 0, "a map path", "war3 map units <map>")?;
+    let map = Map::from_source(&war3_archive::Archive::open(path)?)?;
+    let Some(file) = &map.units else {
+        let reason = map
+            .diagnostics
+            .items()
+            .iter()
+            .find(|d| d.message.contains("war3mapUnits.doo"))
+            .map_or_else(
+                || "the map has no war3mapUnits.doo".to_string(),
+                |d| d.message.clone(),
+            );
+        return Err(Error::msg(format!("units unavailable: {reason}")));
+    };
+
+    println!("units  {path}");
+    println!("{}", "=".repeat(60));
+    outfmt::field(
+        "file version",
+        format!("v{}/sub{}", file.version, file.subversion),
+        20,
+    );
+    outfmt::field("records", file.units.len(), 20);
+    // Version 8 always carries the item-table field, so counting its presence
+    // would claim every unit has item data. Only a real table index or an
+    // inventory counts.
+    let placed_items = file
+        .units
+        .iter()
+        .filter(|u| u.item_table.is_some_and(|t| t >= 0) || !u.inventory.is_empty())
+        .count();
+    let levelled = file.units.iter().filter(|u| u.hero_level > 1).count();
+    outfmt::field("levelled units", levelled, 20);
+    outfmt::field("with item data", placed_items, 20);
+
+    let mut kinds = std::collections::BTreeMap::new();
+    for u in &file.units {
+        *kinds.entry(u.kind.to_string()).or_insert(0usize) += 1;
+    }
+    outfmt::section("most common types");
+    let mut ranked: Vec<_> = kinds.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    for (kind, count) in ranked.iter().take(12) {
+        outfmt::field(kind, count, 20);
+    }
+
+    outfmt::section("by player");
+    let mut players = std::collections::BTreeMap::new();
+    for u in &file.units {
+        *players.entry(u.player).or_insert(0usize) += 1;
+    }
+    for (player, count) in &players {
+        outfmt::field(&format!("player {player}"), count, 20);
+    }
+
+    outfmt::section("first records");
+    println!(
+        "{}{:<6} {:>7}  {:<24} {:>6} {:>6} {:>6}",
+        outfmt::INDENT,
+        "type",
+        "player",
+        "position",
+        "hp",
+        "mana",
+        "level"
+    );
+    for u in file.units.iter().take(20) {
+        println!(
+            "{}{:<6} {:>7}  ({:>8.1},{:>8.1},{:>7.1})  {:>6} {:>6} {:>6}",
+            outfmt::INDENT,
+            u.kind,
+            u.player,
+            u.position.x,
+            u.position.y,
+            u.position.z,
+            if u.hit_points < 0 {
+                "def".to_string()
+            } else {
+                u.hit_points.to_string()
+            },
+            if u.mana < 0 {
+                "def".to_string()
+            } else {
+                u.mana.to_string()
+            },
+            u.hero_level
+        );
+    }
+    if file.units.len() > 20 {
+        println!("{}... {} more", outfmt::INDENT, file.units.len() - 20);
+    }
+
+    let has_problems = outfmt::diagnostics(&map.diagnostics, verbose(args));
     Ok(if has_problems {
         ExitCode::from(1)
     } else {

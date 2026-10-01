@@ -86,6 +86,13 @@ pub enum DiagnosticCode {
     /// A `TRIGSTR_nnn` reference points at an index the table does not have.
     WtsMissingKey,
 
+    // ---- placed units and doodads (.doo) ----
+    /// A `.doo` record had a non-zero value in a field the format does not
+    /// explain, so a round trip has to preserve it rather than normalise it.
+    DooUnknownField,
+    /// Bytes were left over after the last `.doo` record.
+    DooTrailingBytes,
+
     // ---- assets ----
     /// A display name degraded to a key name or raw identifier.
     AssetFallbackUsed,
@@ -112,6 +119,8 @@ impl DiagnosticCode {
             Self::W3iScriptLanguageUnknown => "w3i.script-language-unknown",
             Self::WtsUnterminatedEntry => "wts.unterminated-entry",
             Self::WtsMissingKey => "wts.missing-key",
+            Self::DooUnknownField => "doo.unknown-field",
+            Self::DooTrailingBytes => "doo.trailing-bytes",
             Self::AssetFallbackUsed => "asset.fallback-used",
         }
     }
