@@ -85,6 +85,20 @@ pub enum MpqError {
     },
     /// A member file does not exist.
     NotFound(String),
+    /// A member cannot be written the way it was asked to be.
+    MemberNotWritable {
+        /// The member's name.
+        name: String,
+        /// Why it cannot be relocated.
+        reason: &'static str,
+    },
+    /// The archive has more members than the format can address.
+    ///
+    /// The original format caps the hash table at 32768 entries.
+    TooManyMembers(usize),
+    /// The bytes before the header are neither empty nor a whole number of
+    /// 512-byte sectors, so the header would not land on a sector boundary.
+    BadPrefixLength(usize),
     /// Decompression failed.
     Codec(CodecError),
     /// A structural parse failure.
@@ -114,6 +128,17 @@ impl fmt::Display for MpqError {
                 "decompressed length mismatch: block table declared {expected}, got {got}"
             ),
             Self::NotFound(name) => write!(f, "archive has no {name}"),
+            Self::MemberNotWritable { name, reason } => {
+                write!(f, "cannot write member {name:?}: {reason}")
+            }
+            Self::TooManyMembers(n) => write!(
+                f,
+                "{n} members exceed the 32768 hash table entries the original format allows"
+            ),
+            Self::BadPrefixLength(n) => write!(
+                f,
+                "a prefix of {n} bytes does not put the header on a 512-byte sector boundary"
+            ),
             Self::Codec(e) => write!(f, "decompression failed: {e}"),
             Self::Parse(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
@@ -368,6 +393,28 @@ impl BlockEntry {
     }
 }
 
+/// One member exactly as it is stored, ready to be written back.
+///
+/// This is the hand-off type between reading and writing: it carries the block
+/// bytes verbatim plus the table metadata that describes them, so a rebuild can
+/// copy a member the reader cannot even decompress (a PKWare-imploded `.wts`,
+/// for instance) without understanding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawMember {
+    /// The member's name, as it will be hashed for lookup.
+    pub name: String,
+    /// The bytes as they appear on disk, including any sector table.
+    pub block: Vec<u8>,
+    /// Size after decompression.
+    pub uncompressed_size: u32,
+    /// The block table's flag word, preserved verbatim.
+    pub flags: BlockFlags,
+    /// Language from the hash table entry.
+    pub locale: u16,
+    /// Platform from the hash table entry.
+    pub platform: u8,
+}
+
 /// A summary of an archive's structure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveInfo {
@@ -486,6 +533,46 @@ impl Archive {
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    /// The bytes before the header: the `HM3W` map prefix, or empty.
+    ///
+    /// Rewriting a map has to carry this over verbatim. It holds the map name
+    /// the game shows in its map list, and its length is what puts the header at
+    /// offset 512 rather than 0.
+    #[must_use]
+    pub fn prefix(&self) -> &[u8] {
+        let end = usize::try_from(self.header.file_offset)
+            .unwrap_or(0)
+            .min(self.buffer.len());
+        &self.buffer[..end]
+    }
+
+    /// One member's stored bytes and table metadata, for rewriting it verbatim.
+    pub fn raw_member(&self, name: &str) -> MpqResult<RawMember> {
+        let missing = || MpqError::NotFound(name.to_string());
+        let slot = self.find_slot(name).ok_or_else(missing)?;
+        let entry = self.hash_table.get(slot).ok_or_else(missing)?;
+        let block = self
+            .block_table
+            .get(entry.block_index as usize)
+            .ok_or_else(missing)?;
+
+        let base = usize::try_from(self.header.file_offset).map_err(|_| MpqError::Eof)?;
+        let start = base + block.file_pos as usize;
+        let end = start
+            .checked_add(block.compressed_size as usize)
+            .ok_or(MpqError::Eof)?;
+        let bytes = self.buffer.get(start..end).ok_or(MpqError::Eof)?;
+
+        Ok(RawMember {
+            name: name.to_string(),
+            block: bytes.to_vec(),
+            uncompressed_size: block.uncompressed_size,
+            flags: block.flags,
+            locale: entry.locale,
+            platform: entry.platform,
+        })
     }
 
     /// The member names that were enumerated, uppercase and sorted.
@@ -642,8 +729,11 @@ impl Archive {
         }
     }
 
-    /// Looks up a block index by probing the hash table.
-    fn lookup_raw(&self, name: &str) -> Option<u32> {
+    /// The hash table slot holding a name, found by probing.
+    ///
+    /// The slot is needed, not just the block index: the entry also carries the
+    /// member's locale and platform, which a rebuild has to preserve.
+    fn find_slot(&self, name: &str) -> Option<usize> {
         let table = crypt_table();
         let upper = normalise_name(name);
         let mask = self.header.hash_table_size - 1;
@@ -654,7 +744,7 @@ impl Archive {
 
         for probe in 0..self.header.hash_table_size {
             let slot = (start + probe) & mask;
-            let entry = &self.hash_table[slot as usize];
+            let entry = self.hash_table[slot as usize];
             if entry.is_empty() {
                 // An unused slot means the name is absent, so probing can stop.
                 return None;
@@ -668,10 +758,16 @@ impl Archive {
                 && entry.name_b == want_b
                 && (entry.block_index as usize) < self.block_table.len()
             {
-                return Some(entry.block_index);
+                return Some(slot as usize);
             }
         }
         None
+    }
+
+    /// Looks up a block index by probing the hash table.
+    fn lookup_raw(&self, name: &str) -> Option<u32> {
+        let slot = self.find_slot(name)?;
+        Some(self.hash_table[slot].block_index)
     }
 
     /// Looks up by normalised key first, then by hashing.

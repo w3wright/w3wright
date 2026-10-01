@@ -2,6 +2,7 @@
 
 use std::process::ExitCode;
 
+use war3_core::diag::{Diagnostic, DiagnosticCode, Diagnostics};
 use war3_core::{Error, Result};
 use war3_map::Map;
 
@@ -15,6 +16,10 @@ USAGE:
   war3 map file <map> <member>               write one member file
   war3 map terrain <map> [--verbose]         terrain statistics
   war3 map archive <map>                     MPQ archive structure
+  war3 map rebuild <in> <out> [options]      rewrite the archive with our writer
+                                             --stored       re-encode members we can decode
+                                             --drop-unnamed drop members that have no name
+                                             --no-verify    skip reading the result back
 ";
 
 /// Dispatches a `map` subcommand.
@@ -30,6 +35,7 @@ pub fn run(args: &[String]) -> Result<ExitCode> {
         "file" => file(rest),
         "terrain" => terrain(rest),
         "archive" => archive(rest),
+        "rebuild" => rebuild(rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             Ok(ExitCode::SUCCESS)
@@ -306,6 +312,163 @@ fn file(args: &[String]) -> Result<ExitCode> {
     use std::io::Write;
     std::io::stdout().write_all(&bytes)?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// What a member should be compared by, when checking a rebuild.
+///
+/// Decoded content when this workspace can decode it; otherwise the stored
+/// bytes, because a member that cannot be decoded has nothing else to compare —
+/// and it is exactly the member that must survive untouched.
+fn comparable(archive: &war3_archive::Archive, name: &str) -> std::result::Result<Vec<u8>, String> {
+    match archive.read_file(name) {
+        Ok(data) => Ok(data),
+        Err(_) => archive
+            .raw_member(name)
+            .map(|m| m.block)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// `war3 map rebuild`: rewrites an archive with this workspace's writer.
+///
+/// This is the container half of the build direction, and the check the
+/// prototype is judged by: a map that survives read → write → read unchanged.
+/// Nothing here understands any `war3map.*` format; it moves blocks.
+fn rebuild(args: &[String]) -> Result<ExitCode> {
+    const USAGE: &str = "war3 map rebuild <in> <out> [--stored] [--drop-unnamed] [--no-verify]";
+    let input = required_arg(args, 0, "an input path", USAGE)?;
+    let output = required_arg(args, 1, "an output path", USAGE)?;
+    let reencode = args.iter().any(|a| a == "--stored");
+    let drop_unnamed = args.iter().any(|a| a == "--drop-unnamed");
+    let verify = !args.iter().any(|a| a == "--no-verify");
+
+    let source = war3_archive::Archive::open(input)?;
+    let mut diagnostics = Diagnostics::new();
+
+    // A member is identified by the hash of its name and by nothing else, so a
+    // block whose name never surfaced cannot be written back. Refusing is the
+    // only honest option: the alternative is an archive that quietly lost part
+    // of the map.
+    let named = source.file_count();
+    let used = source.used_block_count();
+    if named < used {
+        let lost = used - named;
+        if !drop_unnamed {
+            return Err(Error::msg(format!(
+                "{used} blocks are in use but only {named} names could be recovered, so rebuilding \
+                 would drop {lost} member(s); pass --drop-unnamed to accept that"
+            )));
+        }
+        diagnostics.push(Diagnostic::warn(
+            DiagnosticCode::MpqNoListfile,
+            format!("{lost} member(s) have no recoverable name and were dropped"),
+        ));
+    }
+
+    let mut builder = war3_archive::ArchiveBuilder::with_prefix(source.prefix().to_vec())?;
+    let mut names = source.file_names();
+    names.sort_unstable();
+    let count = names.len();
+
+    let (mut verbatim, mut reencoded) = (0usize, 0usize);
+    for name in &names {
+        let raw = source.raw_member(name)?;
+        if !reencode {
+            builder.add_raw(raw)?;
+            verbatim += 1;
+            continue;
+        }
+        match source.read_file(name) {
+            Ok(data) => {
+                builder.add_stored(*name, data);
+                reencoded += 1;
+            }
+            Err(e) => {
+                // This workspace cannot decode it, so it goes back byte for byte
+                // rather than being dropped or guessed at.
+                diagnostics.push(Diagnostic::warn(
+                    DiagnosticCode::MpqUnsupportedCompression,
+                    format!("{name}: kept verbatim, {e}"),
+                ));
+                builder.add_raw(raw)?;
+                verbatim += 1;
+            }
+        }
+    }
+
+    builder.write(output)?;
+    let written = std::fs::metadata(output)
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
+
+    println!("rebuild  {input} -> {output}");
+    println!("{}", "=".repeat(60));
+    outfmt::field("members", builder.member_count(), 22);
+    outfmt::field(
+        if reencode {
+            "verbatim"
+        } else {
+            "copied verbatim"
+        },
+        verbatim,
+        22,
+    );
+    if reencode {
+        outfmt::field("re-encoded", reencoded, 22);
+    }
+    outfmt::field("prefix", format!("{} bytes", source.prefix().len()), 22);
+    outfmt::field("output size", outfmt::bytes(written), 22);
+
+    let mut mismatched = Vec::new();
+    if verify {
+        outfmt::section("verify");
+        let rebuilt = war3_archive::Archive::open(output)?;
+        // The prefix is what the game reads the map's name and flags out of, so
+        // a rebuild has to reproduce it exactly.
+        if rebuilt.prefix() != source.prefix() {
+            mismatched.push(format!(
+                "prefix: {} bytes vs {} bytes",
+                source.prefix().len(),
+                rebuilt.prefix().len()
+            ));
+        }
+        for name in &names {
+            let before = comparable(&source, name);
+            let after = comparable(&rebuilt, name);
+            match (before, after) {
+                (Ok(a), Ok(b)) if a == b => {}
+                (Ok(a), Ok(b)) => mismatched.push(format!(
+                    "{name}: {a_len} vs {b_len} bytes differ",
+                    a_len = a.len(),
+                    b_len = b.len()
+                )),
+                (a, b) => mismatched.push(format!("{name}: {a:?} vs {b:?}")),
+            }
+        }
+        if mismatched.is_empty() {
+            outfmt::field("identical", format!("{count} of {count} members"), 22);
+        } else {
+            outfmt::field(
+                "identical",
+                format!("{} of {count}", count - mismatched.len()),
+                22,
+            );
+            for line in &mismatched {
+                println!("{}MISMATCH {line}", outfmt::INDENT);
+            }
+            diagnostics.push(Diagnostic::error(
+                DiagnosticCode::MpqHashCollisionSkipped,
+                format!("{} member(s) did not survive the rebuild", mismatched.len()),
+            ));
+        }
+    }
+
+    let has_problems = outfmt::diagnostics(&diagnostics, verbose(args));
+    Ok(if has_problems || !mismatched.is_empty() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// `war3 map terrain`.

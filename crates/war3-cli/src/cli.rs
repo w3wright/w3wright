@@ -22,6 +22,7 @@ COMMANDS:
   map file <map> <member>    write one member file to standard output
   map terrain <map>          print terrain statistics
   map archive <map>          print MPQ archive structure
+  map rebuild <in> <out>     rewrite an archive with this workspace's writer
   meta check <game-dir>      check whether metadata and trigger definitions are findable
   help                       show this help
 
@@ -112,6 +113,7 @@ mod tests {
             "map file",
             "map terrain",
             "map archive",
+            "map rebuild",
             "meta check",
         ] {
             assert!(HELP.contains(cmd), "help is missing {cmd}");

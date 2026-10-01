@@ -13,14 +13,16 @@
 #![warn(missing_debug_implementations)]
 
 pub mod archive;
+pub mod build;
 pub mod codec;
 pub mod crypto;
 
 pub use archive::{
     find_header, normalise_name, parse_imports, Archive, ArchiveHeader, ArchiveInfo, BlockEntry,
-    BlockFlags, HashEntry, ImportEntry, KNOWN_MEMBER_NAMES, MPQ_MAGIC, MPQ_MAGIC_LEN,
+    BlockFlags, HashEntry, ImportEntry, RawMember, KNOWN_MEMBER_NAMES, MPQ_MAGIC, MPQ_MAGIC_LEN,
     MPQ_SEARCH_STEP,
 };
+pub use build::ArchiveBuilder;
 pub use codec::{decompress, inflate, zlib_decompress};
 pub use crypto::{
     bytes_to_u32_le, crypt_table, decrypt, encrypt, hash_string, HashType, BLOCK_TABLE_KEY_NAME,
