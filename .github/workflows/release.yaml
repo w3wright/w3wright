@@ -61,6 +61,25 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      # The map samples are gitignored and belong to other people, so the
+      # end-to-end read path is exercised against an archive generated here.
+      # It has a known-correct answer by construction, and it pins the assembly
+      # the unit tests cannot: header at offset 512, four member layouts, and
+      # both the deflated and the stored sector branches.
+      - name: Synthetic archive round trip
+        run: |
+          set -euo pipefail
+          cargo run --example make_synthetic -p war3-archive -- /tmp/synthetic.w3x
+          # Exit code 1 means "succeeded with diagnostics": this archive
+          # deliberately has no (listfile).
+          cargo run -p war3-cli -- map list /tmp/synthetic.w3x > /tmp/listed.txt || test $? -eq 1
+          cat /tmp/listed.txt
+          for member in WAR3MAP.W3I WAR3MAP.W3E WAR3MAP.J WAR3MAP.WTS; do
+            grep -q "$member" /tmp/listed.txt
+          done
+          cargo run -p war3-cli -- map file /tmp/synthetic.w3x war3map.j > /tmp/script.j || test $? -eq 1
+          grep -q 'function main' /tmp/script.j
+
       - name: Docs
         env:
           RUSTDOCFLAGS: -D warnings

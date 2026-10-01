@@ -99,23 +99,73 @@ pub fn hash_string(table: &[u32; 0x500], hash_type: HashType, name: &str) -> u32
     hash
 }
 
-/// Decrypts 32-bit words in place.
+/// Name whose `FileKey` hash encrypts the hash table.
 ///
-/// Used for the hash table, the block table and encrypted file contents.
+/// The tables are **not** keyed by an ASCII constant such as `HASH` or `BLK#`.
+/// The format specification is explicit: "the hash table is encrypted using the
+/// hash of `(hash table)` as the key", and likewise `(block table)` for the
+/// block table, both with [`HashType::FileKey`].
+pub const HASH_TABLE_KEY_NAME: &str = "(hash table)";
+
+/// Name whose `FileKey` hash encrypts the block table.
+pub const BLOCK_TABLE_KEY_NAME: &str = "(block table)";
+
+/// Applies the format's word-wise cipher in place, recovering the plaintext.
 ///
-/// Decryption is inherently sequential: both `seed` and `key` advance with each
-/// word, so a slice cannot be decrypted in parallel or partially.
+/// # Why this is not simply "the inverse" of [`encrypt`]
+///
+/// The chain always advances on the **plaintext** word. Encryption has it in
+/// hand because it is the input; decryption recovers it as `cipher ^ (key +
+/// seed)`. Everything else — the table step, the key walk, the seed fold — is
+/// identical, so the two functions differ in exactly one expression.
+///
+/// That single expression is why a generator must not be written by copying
+/// this body and calling it "encrypt". Such a pair round-trips perfectly and
+/// hides any mistake in the shared parts — which is how this crate came to
+/// decrypt every real archive into noise while its own test archive read back
+/// byte-identically. See the module tests for the pinned vectors that make that
+/// failure impossible to reintroduce.
+///
+/// Used for the hash table, the block table and encrypted member contents. The
+/// transformation is inherently sequential: both `seed` and `key` advance with
+/// each word, so a slice cannot be processed in parallel or partially.
 pub fn decrypt(table: &[u32; 0x500], data: &mut [u32], mut key: u32) {
     let mut seed: u32 = 0xEEEE_EEEE;
     for value in data.iter_mut() {
         seed = seed.wrapping_add(table[0x400 + (key & 0xFF) as usize]);
         let plain = *value ^ (key.wrapping_add(seed));
-        key = ((!key << 0x15).wrapping_add(3)) ^ plain.wrapping_add(seed).wrapping_add(seed << 5);
+        // The key walks its own sequence and does **not** depend on the data.
+        // Folding the plaintext into it here (a plausible-looking variant that
+        // circulates widely, including in the pseudocode this crate was first
+        // written from) makes every real archive decrypt into noise, while
+        // still round-tripping archives this workspace generated itself.
+        key = ((!key << 0x15).wrapping_add(0x1111_1111)) | (key >> 0x0B);
         seed = plain
             .wrapping_add(seed)
             .wrapping_add(seed << 5)
             .wrapping_add(3);
         *value = plain;
+    }
+}
+
+/// Applies the format's word-wise cipher in place, turning plaintext into
+/// ciphertext.
+///
+/// Identical to [`decrypt`] except that the seed fold consumes the word that
+/// was *read* rather than the word that was *written* — which is the same
+/// quantity, the plaintext, in both cases. The two are therefore exact
+/// inverses: `decrypt(encrypt(words, k), k) == words`.
+pub fn encrypt(table: &[u32; 0x500], data: &mut [u32], mut key: u32) {
+    let mut seed: u32 = 0xEEEE_EEEE;
+    for value in data.iter_mut() {
+        seed = seed.wrapping_add(table[0x400 + (key & 0xFF) as usize]);
+        let plain = *value;
+        *value = plain ^ (key.wrapping_add(seed));
+        key = ((!key << 0x15).wrapping_add(0x1111_1111)) | (key >> 0x0B);
+        seed = plain
+            .wrapping_add(seed)
+            .wrapping_add(seed << 5)
+            .wrapping_add(3);
     }
 }
 
@@ -219,6 +269,27 @@ mod tests {
     }
 
     #[test]
+    fn table_keys_are_the_hashes_of_their_names() {
+        // The keys that encrypt the two tables are `HashString` of these
+        // literal names with `MPQ_HASH_FILE_KEY`. They are *not* the ASCII
+        // constants `HASH` and `BLK#`: using those makes every real archive's
+        // tables decrypt into noise, with no error anywhere.
+        //
+        // Pinned because these two numbers decide whether any real file can be
+        // read at all. `war3.mpq`'s hash table decrypts to 22084 empty slots out
+        // of 32768 with the first, and to zero empty slots with anything else.
+        let t = crypt_table();
+        assert_eq!(
+            hash_string(&t, HashType::FileKey, HASH_TABLE_KEY_NAME),
+            0xC3AF_3770
+        );
+        assert_eq!(
+            hash_string(&t, HashType::FileKey, BLOCK_TABLE_KEY_NAME),
+            0xEC83_B3A3
+        );
+    }
+
+    #[test]
     fn decrypt_is_deterministic() {
         let t = crypt_table();
         let original: Vec<u32> = (0..8u32).map(|i| i.wrapping_mul(0x9E37_79B9)).collect();
@@ -241,6 +312,38 @@ mod tests {
         decrypt(&t, &mut a, 7);
         decrypt(&t, &mut b, 7);
         assert_ne!(a[0], b[1]);
+    }
+
+    #[test]
+    fn encrypt_and_decrypt_are_exact_inverses_and_match_pinned_vectors() {
+        // Pinned against an independent implementation of the specification's
+        // `EncryptData`/`DecryptData`, and checked end to end against real
+        // Blizzard archives (`war3.mpq`, `(4)LostTemple.w3m`, YDWE's sample).
+        //
+        // These numbers are the guard that the previous, wrong cipher could not
+        // have passed: it folded the plaintext into the key update, and its own
+        // generator shared the mistake, so nothing in this workspace noticed.
+        let t = crypt_table();
+        let plaintext: Vec<u32> = (1..=8u32).map(|i| i.wrapping_mul(0x1111_1111)).collect();
+        let encrypted: Vec<u32> = [
+            0x3A05_D103,
+            0xB223_BDA6,
+            0xA2AD_0871,
+            0xC2A4_1977,
+            0x941E_270C,
+            0x3F8C_B1C0,
+            0xB5C0_6688,
+            0xD511_208D,
+        ]
+        .to_vec();
+
+        let mut out = plaintext.clone();
+        encrypt(&t, &mut out, 0x1234_5678);
+        assert_eq!(out, encrypted, "encrypt must match the pinned ciphertext");
+
+        let mut back = encrypted.clone();
+        decrypt(&t, &mut back, 0x1234_5678);
+        assert_eq!(back, plaintext, "decrypt must recover the pinned plaintext");
     }
 
     #[test]

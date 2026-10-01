@@ -1,16 +1,19 @@
 //! MPQ archive reading.
 //!
-//! Three properties of the container are easy to get wrong and all of them fail
+//! Four properties of the container are easy to get wrong and all of them fail
 //! silently:
 //!
 //! 1. **The header is not necessarily at offset 0.** Map files carry an `HM3W`
 //!    prefix and the archive starts on the next 0x200 boundary, usually at 512.
 //!    The magic has to be searched for in 0x200 steps.
-//! 2. **Offsets inside the header are relative to the header**, while a block
-//!    entry's `file_pos` is relative to the start of the file. Two coordinate
-//!    systems in one structure.
+//! 2. **Every offset is relative to the archive header**, including a block
+//!    entry's `file_pos`. For an archive at offset 0 the two readings agree; for
+//!    a map they differ by 512, and reading member data without adding the
+//!    header offset yields 512 bytes of the wrong data with no error at all.
 //! 3. **Table positions must be read from the header**, never assumed: the
 //!    tables may sit before, after or inside the data region.
+//! 4. **The tables are keyed by the hash of `(hash table)` and `(block table)`**,
+//!    not by an ASCII constant. See [`HASH_TABLE_KEY_NAME`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -20,7 +23,10 @@ use war3_core::diag::{DiagnosticCode, Diagnostics};
 use war3_core::ParseError;
 
 use crate::codec::{self, CodecError};
-use crate::crypto::{bytes_to_u32_le, crypt_table, decrypt, hash_string, HashType};
+use crate::crypto::{
+    bytes_to_u32_le, crypt_table, decrypt, hash_string, HashType, BLOCK_TABLE_KEY_NAME,
+    HASH_TABLE_KEY_NAME,
+};
 
 /// MPQ magic bytes.
 pub const MPQ_MAGIC: [u8; 4] = *b"MPQ\x1a";
@@ -34,6 +40,11 @@ const HASH_ENTRY_SIZE: usize = 16;
 const BLOCK_ENTRY_SIZE: usize = 16;
 /// Block index value marking an unused hash slot.
 const HASH_ENTRY_EMPTY: u32 = 0xFFFF_FFFF;
+/// Block index value marking a slot whose file was deleted.
+///
+/// Such a slot does **not** terminate a probe: the file may have been moved
+/// further along the overflow chain.
+const HASH_ENTRY_DELETED: u32 = 0xFFFF_FFFE;
 
 /// Errors returned while reading an archive.
 #[derive(Debug)]
@@ -209,17 +220,28 @@ pub struct HashEntry {
     pub name_b: u32,
     /// Locale, in the low 16 bits.
     pub locale: u16,
-    /// Platform, in the high 16 bits.
-    pub platform: u16,
+    /// Platform, a single byte at 0x0A.
+    pub platform: u8,
     /// Index into the block table, or `0xFFFFFFFF` for an unused slot.
     pub block_index: u32,
 }
 
 impl HashEntry {
     /// Whether this slot is unused.
+    ///
+    /// An unused slot terminates a lookup: the name is not in the table.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.block_index == HASH_ENTRY_EMPTY
+    }
+
+    /// Whether this slot held a file that was deleted.
+    ///
+    /// Unlike [`HashEntry::is_empty`] this does **not** end a probe — the file
+    /// may have overflowed further along the chain.
+    #[must_use]
+    pub const fn is_deleted(&self) -> bool {
+        self.block_index == HASH_ENTRY_DELETED
     }
 }
 
@@ -234,8 +256,12 @@ impl BlockFlags {
     pub const SIZE_IN_BLOCK: u32 = 0x0000_0100;
     /// The member is encrypted.
     pub const ENCRYPTED: u32 = 0x0001_0000;
-    /// Encrypted with a fixed key rather than one derived from the file name.
-    pub const FIX_KEY: u32 = 0x0002_0000;
+    /// The member's key is adjusted by its block offset and file size.
+    ///
+    /// Only meaningful together with [`BlockFlags::ENCRYPTED`]. This is not a
+    /// "fixed key": it selects a *different derivation* of the key, namely
+    /// `(HashString(name, FileKey) + block_offset) ^ file_size`.
+    pub const BLOCK_OFFSET_ADJUSTED_KEY: u32 = 0x0002_0000;
     /// The member is one block, with no sector offset table.
     pub const SINGLE_UNIT: u32 = 0x0100_0000;
     /// The member has a sector offset table and independently compressed sectors.
@@ -271,8 +297,8 @@ impl fmt::Display for BlockFlags {
         if self.is_encrypted() {
             parts.push("encrypted");
         }
-        if self.has(Self::FIX_KEY) {
-            parts.push("fix-key");
+        if self.has(Self::BLOCK_OFFSET_ADJUSTED_KEY) {
+            parts.push("offset-adjusted-key");
         }
         if self.has(Self::SINGLE_UNIT) {
             parts.push("single-unit");
@@ -367,11 +393,11 @@ pub struct Archive {
     /// The **entire** file, from offset 0, including any `HM3W` prefix.
     ///
     /// Keeping the whole file rather than a slice starting at the MPQ header is
-    /// deliberate: the header's table offsets are relative to the header while a
-    /// block entry's `file_pos` is relative to the file, so both coordinate
-    /// systems are in play. Slicing off the prefix would mean remembering to
-    /// subtract `file_offset` at every block read, and forgetting once reads
-    /// garbage without any error.
+    /// deliberate: every offset in the format is relative to the header, so the
+    /// header's own position has to be added at each table and member read.
+    /// Slicing the prefix off would mean either adjusting once and trusting that
+    /// no path forgot, or forgetting — and forgetting reads 512 bytes of the
+    /// wrong data with no error at all.
     buffer: Vec<u8>,
     header: ArchiveHeader,
     hash_table: Vec<HashEntry>,
@@ -527,15 +553,24 @@ impl Archive {
     }
 
     /// Parses `(listfile)`.
-    fn read_listfile_names(&self) -> MpqResult<Vec<String>> {
+    ///
+    /// Returns the names, and whether any byte sequence had to be replaced. A
+    /// listfile written by a non-English World Editor is often in a local code
+    /// page; rejecting the whole file because one name is not UTF-8 would lose
+    /// every other name with it.
+    fn read_listfile_names(&self) -> MpqResult<(Vec<String>, bool)> {
         let raw = self.read_file("(listfile)")?;
-        let text = String::from_utf8(raw).map_err(|_| MpqError::BadListfileEncoding)?;
-        Ok(text
-            .split(['\r', '\n'])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect())
+        let lossy = std::str::from_utf8(&raw).is_err();
+        // Entries are separated by ';', CR, LF, or some combination.
+        Ok((
+            String::from_utf8_lossy(&raw)
+                .split([';', '\r', '\n'])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            lossy,
+        ))
     }
 
     /// Builds the name index using the enumeration ladder.
@@ -547,7 +582,14 @@ impl Archive {
 
         // Step 1: (listfile)
         match self.read_listfile_names() {
-            Ok(names) => {
+            Ok((names, lossy)) => {
+                if lossy {
+                    diagnostics.push(war3_core::Diagnostic::warn(
+                        DiagnosticCode::MpqListfileNotUtf8,
+                        "(listfile) is not valid UTF-8; the undecodable bytes were replaced, so \
+                         the affected member names will not resolve",
+                    ));
+                }
                 for name in names {
                     self.insert_name(&name);
                 }
@@ -608,6 +650,7 @@ impl Archive {
 
         let start = hash_string(&table, HashType::TableOffset, &upper) & mask;
         let want_a = hash_string(&table, HashType::NameA, &upper);
+        let want_b = hash_string(&table, HashType::NameB, &upper);
 
         for probe in 0..self.header.hash_table_size {
             let slot = (start + probe) & mask;
@@ -616,7 +659,15 @@ impl Archive {
                 // An unused slot means the name is absent, so probing can stop.
                 return None;
             }
-            if entry.name_a == want_a && (entry.block_index as usize) < self.block_table.len() {
+            if entry.is_deleted() {
+                // A deleted slot does not end the search: the file may have
+                // overflowed past it.
+                continue;
+            }
+            if entry.name_a == want_a
+                && entry.name_b == want_b
+                && (entry.block_index as usize) < self.block_table.len()
+            {
                 return Some(entry.block_index);
             }
         }
@@ -634,7 +685,12 @@ impl Archive {
 
     /// Reads one block.
     fn read_entry(&self, entry: &BlockEntry, name: &str) -> MpqResult<Vec<u8>> {
-        let start = entry.file_pos as usize;
+        // A member's position is relative to the archive header, exactly like
+        // the table positions. For an archive at file offset 0 the two readings
+        // coincide, which is why this is easy to get wrong: for a map the header
+        // sits at 512 and every member would come back shifted by 512 bytes.
+        let archive_base = usize::try_from(self.header.file_offset).map_err(|_| MpqError::Eof)?;
+        let start = archive_base + entry.file_pos as usize;
         let size = entry.compressed_size as usize;
         let end = start.checked_add(size).ok_or(MpqError::Eof)?;
         let uncompressed = entry.uncompressed_size as usize;
@@ -646,75 +702,88 @@ impl Archive {
             return Err(MpqError::Eof);
         }
 
-        // Single-block member: no sector offset table, decompressed in one go.
-        if entry.flags.has(BlockFlags::SINGLE_UNIT) {
-            let mut data = self.buffer[start..end].to_vec();
-            if entry.flags.is_encrypted() {
-                let key = self.file_key(entry, name);
-                decrypt_in_place(&mut data, key);
-            }
-            if entry.flags.is_compressed() {
-                // Decompression failure must be an error. Falling back to the raw
-                // bytes would hand the caller data that looks plausible but is
-                // completely misplaced.
-                let out = codec::decompress(&data, entry.flags.0, uncompressed)?;
-                return Ok(out);
-            }
-            data.truncate(uncompressed.min(data.len()));
-            return Ok(data);
-        }
-
-        // Multi-block member: read the sector offset table first. It holds one
-        // more entry than there are sectors, the last being the end of the data.
         let sector_size = self.header.sector_size() as usize;
         let sector_count = uncompressed.div_ceil(sector_size);
-        let table_bytes = (sector_count + 1) * 4;
-        if size < table_bytes {
-            return Err(MpqError::SectorTableOutOfRange);
-        }
-        let mut offsets = bytes_to_u32_le(&self.buffer[start..start + table_bytes]);
-        if entry.flags.is_encrypted() {
-            // The sector offset table is keyed with `file_key - 1`, not `file_key`.
-            let key = self.file_key(entry, name);
-            decrypt(&crypt_table(), &mut offsets, key.wrapping_sub(1));
+        let compressed = entry.flags.is_compressed();
+        let key = if entry.flags.is_encrypted() {
+            Some(self.file_key(entry, name))
+        } else {
+            None
+        };
+
+        // Single-block member: one "sector" holding the whole file, and no
+        // sector offset table.
+        if entry.flags.has(BlockFlags::SINGLE_UNIT) {
+            let mut data = self.buffer[start..end].to_vec();
+            if let Some(key) = key {
+                decrypt_in_place(&mut data, key);
+            }
+            if !compressed {
+                data.truncate(uncompressed.min(data.len()));
+                return Ok(data);
+            }
+            // Decompression failure must be an error. Falling back to the raw
+            // bytes would hand the caller data that looks plausible but is
+            // completely misplaced.
+            return self.decode_sector(&data, uncompressed);
         }
 
-        let mut out = Vec::with_capacity(uncompressed);
-        for i in 0..sector_count {
-            let sector_start = start + offsets[i] as usize;
-            let sector_end = start + offsets[i + 1] as usize;
-            if sector_end < sector_start || sector_end > end {
+        // Multi-block. A **compressed** member carries a sector offset table
+        // with one more entry than there are sectors, the last being the end of
+        // the data. An uncompressed one carries none at all: its sector
+        // boundaries follow from the sector size, so reading a table here would
+        // parse member data as offsets.
+        let bounds: Vec<(usize, usize)> = if compressed {
+            let table_bytes = (sector_count + 1) * 4;
+            if size < table_bytes {
                 return Err(MpqError::SectorTableOutOfRange);
             }
-            if sector_start == sector_end {
+            let mut offsets = bytes_to_u32_le(&self.buffer[start..start + table_bytes]);
+            if let Some(key) = key {
+                // The sector offset table is keyed with `file_key - 1`, not
+                // `file_key`.
+                decrypt(&crypt_table(), &mut offsets, key.wrapping_sub(1));
+            }
+            (0..sector_count)
+                .map(|i| (offsets[i] as usize, offsets[i + 1] as usize))
+                .collect()
+        } else {
+            (0..sector_count)
+                .map(|i| {
+                    let from = i * sector_size;
+                    (from, (from + sector_size).min(size))
+                })
+                .collect()
+        };
+
+        let mut out = Vec::with_capacity(uncompressed);
+        for (i, (from, to)) in bounds.into_iter().enumerate() {
+            if to < from || start + to > end {
+                return Err(MpqError::SectorTableOutOfRange);
+            }
+            if from == to {
                 // An empty sector means the whole span is zeroes.
                 out.resize(out.len() + sector_size, 0);
                 continue;
             }
-            let mut data = self.buffer[sector_start..sector_end].to_vec();
-            if entry.flags.is_encrypted() {
-                let key = self.file_key(entry, name).wrapping_add(i as u32);
-                decrypt_in_place(&mut data, key);
+            let mut data = self.buffer[start + from..start + to].to_vec();
+            if let Some(key) = key {
+                decrypt_in_place(&mut data, key.wrapping_add(i as u32));
             }
-            // After decryption the first byte says whether this sector is
-            // compressed: `0xFF` means yes.
-            let compressed_flag = data.first().copied().unwrap_or(0);
-            if entry.flags.is_compressed() && compressed_flag == 0xFF {
-                let payload = data.get(1..).ok_or(MpqError::SectorTableOutOfRange)?;
-                // The last sector is usually shorter than a full sector, so its
-                // expected length comes from the member's total size. Checking
-                // every sector against the full sector size would reject almost
-                // every real file.
-                let sector_expected = if i + 1 == sector_count {
-                    uncompressed.saturating_sub(i * sector_size)
-                } else {
-                    sector_size
-                };
-                let sector = codec::decompress(payload, entry.flags.0, sector_expected)?;
-                out.extend_from_slice(&sector);
-            } else {
+            if !compressed {
                 out.extend_from_slice(&data);
+                continue;
             }
+            // The last sector is usually shorter than a full sector, so its
+            // expected length comes from the member's total size. Checking
+            // every sector against the full sector size would reject almost
+            // every real file.
+            let expected = if i + 1 == sector_count {
+                uncompressed.saturating_sub(i * sector_size)
+            } else {
+                sector_size
+            };
+            out.extend_from_slice(&self.decode_sector(&data, expected)?);
         }
         if out.len() != uncompressed {
             return Err(MpqError::SizeMismatch {
@@ -726,19 +795,40 @@ impl Archive {
         Ok(out)
     }
 
+    /// Turns one stored sector of a compressed member into its data.
+    ///
+    /// Such a sector is stored either raw or compressed, and the format decides
+    /// by size: a raw sector occupies exactly as many bytes as the data it
+    /// holds, while a compressed one is smaller and carries a leading
+    /// compression mask byte (`0x02` deflate, `0x08` PKWare implode, ...).
+    ///
+    /// Blizzard writes the raw form whenever compressing the sector would not
+    /// have saved at least two bytes, so both cases occur in real files.
+    fn decode_sector(&self, data: &[u8], expected: usize) -> MpqResult<Vec<u8>> {
+        if data.len() >= expected {
+            let mut raw = data.to_vec();
+            raw.truncate(expected);
+            return Ok(raw);
+        }
+        let (mask, body) = data.split_first().ok_or(MpqError::SectorTableOutOfRange)?;
+        Ok(codec::decompress(body, u32::from(*mask), expected)?)
+    }
+
     /// Derives the key used to decrypt a member's contents.
     ///
     /// Ordinary members use the `FileKey` hash of the file name with the
-    /// directory part removed. Members with the fixed-key flag use their offset
-    /// in the archive instead.
+    /// directory part removed. A member flagged
+    /// [`BlockFlags::BLOCK_OFFSET_ADJUSTED_KEY`] has that key adjusted by its
+    /// block offset and file size instead.
     fn file_key(&self, entry: &BlockEntry, name: &str) -> u32 {
-        if entry.flags.has(BlockFlags::FIX_KEY) {
-            return entry.file_pos;
-        }
         let table = crypt_table();
         let upper = normalise_name(name);
         let base = upper.rsplit('\\').next().unwrap_or(&upper);
-        hash_string(&table, HashType::FileKey, base)
+        let key = hash_string(&table, HashType::FileKey, base);
+        if entry.flags.has(BlockFlags::BLOCK_OFFSET_ADJUSTED_KEY) {
+            return key.wrapping_add(entry.file_pos) ^ entry.uncompressed_size;
+        }
+        key
     }
 }
 
@@ -795,7 +885,9 @@ fn read_hash_table(
         file_len: buffer.len(),
     })?;
     let mut words = bytes_to_u32_le(raw);
-    let key = u32::from_le_bytes(*b"HASH");
+    // The key is `HashString("(hash table)", MPQ_HASH_FILE_KEY)`, not an ASCII
+    // constant such as `HASH`. See `HASH_TABLE_KEY_NAME`.
+    let key = hash_string(table, HashType::FileKey, HASH_TABLE_KEY_NAME);
     decrypt(table, &mut words, key);
 
     Ok(words
@@ -804,7 +896,10 @@ fn read_hash_table(
             name_a: c[0],
             name_b: c[1],
             locale: (c[2] & 0xFFFF) as u16,
-            platform: (c[2] >> 16) as u16,
+            // Field layout is `int16 Language` at 0x08 followed by `int8
+            // Platform` at 0x0A, so the platform is the low byte of the upper
+            // half — the top byte is padding.
+            platform: ((c[2] >> 16) & 0xFF) as u8,
             block_index: c[3],
         })
         .collect())
@@ -828,7 +923,8 @@ fn read_block_table(
         file_len: buffer.len(),
     })?;
     let mut words = bytes_to_u32_le(raw);
-    let key = u32::from_le_bytes(*b"BLK#");
+    // Same as the hash table: `HashString("(block table)", MPQ_HASH_FILE_KEY)`.
+    let key = hash_string(table, HashType::FileKey, BLOCK_TABLE_KEY_NAME);
     decrypt(table, &mut words, key);
 
     Ok(words
@@ -848,13 +944,19 @@ fn read_block_table(
 
 /// Uppercases a name and maps `/` to `\`, keeping separators.
 ///
-/// This is the form used both for hashing and for deriving decryption keys.
+/// This is the form used both for hashing and for deriving decryption keys, so
+/// the uppercasing must match [`crypto::hash_string`]'s exactly: **ASCII only**.
+/// Unicode uppercasing can change a name's byte length (`ß` becomes `SS`), which
+/// silently changes its hash and therefore makes imported files with non-ASCII
+/// names unresolvable.
 #[must_use]
 pub fn normalise_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c == '/' { '\\' } else { c })
-        .collect::<String>()
-        .to_uppercase()
+        .map(|c| {
+            let c = if c == '/' { '\\' } else { c };
+            c.to_ascii_uppercase()
+        })
+        .collect()
 }
 
 fn decrypt_in_place(data: &mut [u8], key: u32) {
@@ -968,6 +1070,7 @@ pub const KNOWN_MEMBER_NAMES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::encrypt;
 
     #[test]
     fn find_header_scans_by_512_step() {
@@ -1090,5 +1193,200 @@ mod tests {
     fn opening_a_non_archive_reports_no_header_not_panic() {
         let err = Archive::from_bytes(vec![0u8; 4096]).unwrap_err();
         assert!(matches!(err, MpqError::NoArchiveHeader));
+    }
+
+    /// The plaintext of the compressed member in [`tiny_archive`].
+    fn compressed_payload() -> Vec<u8> {
+        b"war3wright".repeat(40)
+    }
+
+    /// A `zlib` stream for `b"war3wright" * 40`, from an independent
+    /// implementation (`python -c "import zlib;print(zlib.compress(b'war3wright'*40,9).hex())"`).
+    ///
+    /// It is 23 bytes, so with its mask byte it is comfortably below the 400
+    /// bytes the sector must hold — which is what makes the reader take its
+    /// compressed branch rather than treat the sector as stored.
+    const COMPRESSED_SECTOR: &[u8] = &[
+        0x78, 0xDA, 0x2B, 0x4F, 0x2C, 0x32, 0x2E, 0x2F, 0xCA, 0x4C, 0xCF, 0x28, 0x29, 0x1F, 0x65,
+        0x0D, 0x02, 0x16, 0x00, 0x83, 0x39, 0xA2, 0xD1,
+    ];
+
+    /// A `zlib` stream for `b"a" * 4096`, from the same independent
+    /// implementation. A full sector, so it can be the first sector of a
+    /// multi-block member.
+    const COMPRESSED_FULL_SECTOR: &[u8] = &[
+        0x78, 0xDA, 0xED, 0xC1, 0x01, 0x0D, 0x00, 0x00, 0x00, 0xC2, 0xA0, 0xAC, 0xEF, 0x5F, 0xC2,
+        0x1E, 0x0E, 0x28, 0x00, 0x00, 0x00, 0xE0, 0xDD, 0x00, 0xEF, 0xCB, 0x10, 0x5B,
+    ];
+
+    /// A whole archive built here rather than read from disk.
+    ///
+    /// The map samples are gitignored and the generated fixture is a build
+    /// artifact, so neither can guard the read path on its own. This one pins
+    /// all of it in a plain `cargo test`: the header behind a 512-byte `HM3W`
+    /// prefix, the two table keys, the cipher, **archive-relative** member
+    /// offsets, hash lookup, the known-names fallback, and both choices the
+    /// reader makes between a stored and a compressed sector.
+    fn tiny_archive() -> Vec<u8> {
+        // Absolute offset of the header, and of the first member.
+        const HEADER: usize = 0x200;
+        const DATA: usize = HEADER + 32;
+        const SECTOR: usize = 4096;
+
+        let stored = b"stored member, not compressed at all".to_vec();
+        // A multi-block member with two full sectors: the first deflated, the
+        // second stored raw. Which is which is decided by stored size alone.
+        let raw_sector = vec![0x5Au8; SECTOR];
+        let multi_first = {
+            let mut b = vec![0x02];
+            b.extend_from_slice(COMPRESSED_FULL_SECTOR);
+            b
+        };
+        let multi = {
+            // Two sectors, so the offset table has three entries.
+            let table_bytes = 3 * 4;
+            let mut b = Vec::new();
+            let end_of_first = table_bytes + multi_first.len();
+            b.extend_from_slice(&(table_bytes as u32).to_le_bytes());
+            b.extend_from_slice(&(end_of_first as u32).to_le_bytes());
+            b.extend_from_slice(&((end_of_first + raw_sector.len()) as u32).to_le_bytes());
+            b.extend_from_slice(&multi_first);
+            b.extend_from_slice(&raw_sector);
+            b
+        };
+
+        // (name, block on disk, uncompressed length, block flags)
+        let members: [(&str, Vec<u8>, u32, u32); 3] = [
+            (
+                "war3map.w3i",
+                {
+                    let mut b = vec![0x02];
+                    b.extend_from_slice(COMPRESSED_SECTOR);
+                    b
+                },
+                compressed_payload().len() as u32,
+                0x8100_0200, // exists | compressed | single-unit
+            ),
+            (
+                "war3map.j",
+                stored.clone(),
+                stored.len() as u32,
+                0x8100_0000, // exists | single-unit
+            ),
+            (
+                "war3map.w3e",
+                multi,
+                (SECTOR * 2) as u32,
+                0x8400_0200, // exists | compressed | multi-block
+            ),
+        ];
+
+        // Lay the members out, remembering archive-relative offsets.
+        let mut cursor = DATA;
+        let mut placed: Vec<(u32, usize, u32, u32)> = Vec::new();
+        for (_, block, uncompressed, flags) in &members {
+            placed.push(((cursor - HEADER) as u32, block.len(), *uncompressed, *flags));
+            cursor += block.len();
+        }
+        let hash_pos = cursor;
+        let hash_size = 16u32;
+        let block_pos = hash_pos + hash_size as usize * 16;
+        let archive_end = block_pos + members.len() * 16;
+
+        let table = crypt_table();
+        let mut hash_words = vec![0xFFFF_FFFFu32; hash_size as usize * 4];
+        let mut block_words = vec![0u32; members.len() * 4];
+        for (index, (name, _, _, _)) in members.iter().enumerate() {
+            let (pos, size, uncompressed, flags) = placed[index];
+            let upper = name.to_uppercase();
+            let mut slot = hash_string(&table, HashType::TableOffset, &upper) & (hash_size - 1);
+            let want_a = hash_string(&table, HashType::NameA, &upper);
+            while hash_words[slot as usize * 4 + 3] != 0xFFFF_FFFF {
+                slot = (slot + 1) & (hash_size - 1);
+            }
+            hash_words[slot as usize * 4] = want_a;
+            hash_words[slot as usize * 4 + 1] = hash_string(&table, HashType::NameB, &upper);
+            hash_words[slot as usize * 4 + 2] = 0;
+            hash_words[slot as usize * 4 + 3] = index as u32;
+
+            block_words[index * 4] = pos;
+            block_words[index * 4 + 1] = size as u32;
+            block_words[index * 4 + 2] = uncompressed;
+            block_words[index * 4 + 3] = flags;
+        }
+        encrypt(
+            &table,
+            &mut hash_words,
+            hash_string(&table, HashType::FileKey, HASH_TABLE_KEY_NAME),
+        );
+        encrypt(
+            &table,
+            &mut block_words,
+            hash_string(&table, HashType::FileKey, BLOCK_TABLE_KEY_NAME),
+        );
+
+        let mut out = vec![0u8; archive_end];
+        out[0..4].copy_from_slice(b"HM3W");
+        out[HEADER..HEADER + 4].copy_from_slice(&MPQ_MAGIC);
+        out[HEADER + 4..HEADER + 8].copy_from_slice(&32u32.to_le_bytes());
+        out[HEADER + 8..HEADER + 12]
+            .copy_from_slice(&((archive_end - HEADER) as u32).to_le_bytes());
+        out[HEADER + 12..HEADER + 14].copy_from_slice(&0u16.to_le_bytes());
+        out[HEADER + 14..HEADER + 16].copy_from_slice(&3u16.to_le_bytes());
+        // Table and member positions are all relative to the header.
+        out[HEADER + 16..HEADER + 20].copy_from_slice(&((hash_pos - HEADER) as u32).to_le_bytes());
+        out[HEADER + 20..HEADER + 24].copy_from_slice(&((block_pos - HEADER) as u32).to_le_bytes());
+        out[HEADER + 24..HEADER + 28].copy_from_slice(&hash_size.to_le_bytes());
+        out[HEADER + 28..HEADER + 32].copy_from_slice(&(members.len() as u32).to_le_bytes());
+
+        let mut at = DATA;
+        for (_, block, _, _) in &members {
+            out[at..at + block.len()].copy_from_slice(block);
+            at += block.len();
+        }
+        for (i, word) in hash_words.iter().enumerate() {
+            out[hash_pos + i * 4..hash_pos + i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        for (i, word) in block_words.iter().enumerate() {
+            out[block_pos + i * 4..block_pos + i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn reads_a_whole_archive_whose_header_is_not_at_offset_zero() {
+        let archive = Archive::from_bytes(tiny_archive()).unwrap();
+        assert_eq!(archive.header().file_offset, 512);
+
+        // Members are found through the known-names fallback: this archive has
+        // no (listfile).
+        assert_eq!(
+            archive.read_file("war3map.w3i").unwrap(),
+            compressed_payload(),
+            "a compressed single-unit member must inflate"
+        );
+        assert_eq!(
+            archive.read_file("war3map.j").unwrap(),
+            b"stored member, not compressed at all",
+            "a stored member must come back as is"
+        );
+
+        // Multi-block, with sector 0 deflated and sector 1 stored raw. The
+        // reader tells them apart by stored size, and getting that wrong here
+        // yields the deflate stream itself rather than the data.
+        let terrain = archive.read_file("war3map.w3e").unwrap();
+        assert_eq!(terrain.len(), 8192);
+        assert!(terrain[..4096].iter().all(|&b| b == b'a'));
+        assert!(terrain[4096..].iter().all(|&b| b == 0x5A));
+    }
+
+    #[test]
+    fn a_header_away_from_zero_is_reported_as_a_diagnostic() {
+        let archive = Archive::from_bytes(tiny_archive()).unwrap();
+        assert!(archive
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|d| d.code == DiagnosticCode::MpqHeaderOffset));
     }
 }

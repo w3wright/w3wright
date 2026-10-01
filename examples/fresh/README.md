@@ -5,13 +5,14 @@
 
 ## Why a separate directory
 
-The samples in [`../lost-temple/`](../lost-temple/README.md) cannot be read, and
-their provenance is muddled: a repackaged installation, an example map from
-another project, and no record of what touched them.
+The samples in [`../lost-temple/`](../lost-temple/README.md) have muddled
+provenance: a repackaged installation, an example map from another project, and
+no record of what touched them. When a new parser disagrees with one of them,
+there is no way to tell whether the parser or the file is the odd one out.
 
-To decide whether the reader or the file is at fault, there has to be a control
-sample that is known to be clean. So this directory holds exactly one kind of
-thing: **a map that the local `World Editor.exe` created and saved itself.**
+So this directory holds exactly one kind of thing: **a map that the local
+`World Editor.exe` created and saved itself**, with nothing else having opened
+it. That is the control sample.
 
 ## How to produce one
 
@@ -28,19 +29,30 @@ If the World Editor will not start, a fallback: copy a map from
 ## What to run
 
 ```bash
-# 1. Archive structure: whether the tables decrypt is immediately visible.
+# 1. Archive structure. The tables decrypting is immediately visible: a valid
+#    hash table is mostly empty slots.
 cargo run --example dump_mpq -p war3-archive -- "examples/fresh/<map>"
 
-# 2. Map parsing, the Phase 1 verb.
+# 2. The Phase 1 verbs.
 cargo run -p war3-cli -- map info "examples/fresh/<map>"
 cargo run -p war3-cli -- map terrain "examples/fresh/<map>"
 cargo run -p war3-cli -- map list "examples/fresh/<map>"
+cargo run -p war3-cli -- map file "examples/fresh/<map>" war3map.w3i > w3i.bin
 ```
 
 ## How to read the result
 
+Archive-level failures are no longer the open question they once were — the
+reader is verified against real Blizzard archives and extracts byte-identically
+to an independent implementation. What remains is parser coverage, so the useful
+signal is now in the per-format output:
+
 | Observation | Conclusion |
 | --- | --- |
-| `named_files > 0` and every block `pos` is inside the file | the reader is fine; continue verifying `.w3i` and `.w3e` |
-| `named_files` is still 0 | the reader is at fault; go back to `crypt_table` and `decrypt` and recover the keystream from known plaintext |
-| `named_files > 0` but `map info` fails | the fault is in the `.w3i` parser; the error names the offset |
+| tables decrypt, every member reads, no diagnostics | the control agrees with the reader |
+| a member reads but a parser rejects it | the fault is in that parser; the error names the offset |
+| `(listfile)` is reported as `unsupported compression mask 0x08` | expected: PKWare implode is not implemented yet |
+| the tables do not decrypt at all | the reader is at fault; go back to `crypt_table`, `decrypt` and the key constants in `war3_archive::crypto` |
+
+A map saved with its `(listfile)` suppressed is still useful: the reader falls
+back to its known-names list and `war3map.imp`, which is a path worth exercising.

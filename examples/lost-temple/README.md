@@ -1,7 +1,8 @@
 # Test map samples
 
 > The `.w3x` / `.w3m` binaries in this directory are **not committed**. See
-> "Licensing and provenance" below. Only this README is tracked.
+> "Licensing and provenance" below. Only this README is tracked, and every
+> command here needs a sample you placed yourself or generated locally.
 
 Samples are organised by what they cover rather than by count.
 
@@ -9,9 +10,9 @@ Samples are organised by what they cover rather than by count.
 
 | File | Source | Covers | Licence |
 | --- | --- | --- | --- |
-| `(4)LostTemple.w3m` | the local installation's `D:\Warcraft3\Maps\` | a classic TFT melee map; **MPQ header at offset 512**; `.w3e`, `.w3i`, `.w3u`, `.w3d` | Blizzard's own map; **local verification only, do not redistribute** |
-| `ydwe-sample-1.19.w3x` | the YDWE repository's example maps | non-ASCII paths and object data extended by YDWE | the YDWE repository is **GPL-3.0**; **local verification only** |
-| `synthetic.w3x` | **generated locally** (see below) | a **structurally valid** MPQ: encrypted tables, multi-block zlib, single-block zlib, stored, and no `(listfile)` | generated here, no third-party rights |
+| `(4)LostTemple.w3m` | the local installation's `D:\Warcraft3\Maps\` | a classic TFT melee map; **MPQ header at offset 512**; `.w3e` v11, `.w3i` v18, `.w3e`, `.w3u`, `.w3d` | Blizzard's own map; **local verification only, do not redistribute** |
+| `ydwe-sample-1.19.w3x` | the YDWE repository's example maps | non-ASCII names and object data extended by YDWE; `.w3i` v25 | the YDWE repository is **GPL-3.0**; **local verification only** |
+| `synthetic.w3x` | **generated locally** (see below) | a **structurally valid** MPQ: encrypted tables, four storage layouts, sectors that are genuinely deflated or stored, and no `(listfile)` | generated here, no third-party rights |
 
 ## Why `synthetic.w3x` exists
 
@@ -27,23 +28,37 @@ archive with a known-correct answer does.
 cargo run --example make_synthetic -p war3-archive -- examples/lost-temple/synthetic.w3x
 ```
 
-The generator writes the archive with the same crypto primitives the reader uses,
-so it exercises:
+It writes four members, one per storage layout:
 
-- tables encrypted with the `HASH` and `BLK#` keys, covering table decryption;
-- 4096-byte sectors with their per-sector compression flag;
-- three members covering the multi-block, single-block and stored layouts;
-- **no `(listfile)`**, forcing the reader onto its known-names fallback;
-- the header at offset 512 behind an `HM3W` prefix.
+| Member | Layout |
+| --- | --- |
+| `war3map.w3i` | one deflated sector, no sector table (`SINGLE_UNIT`) |
+| `war3map.w3e` | a sector offset table plus deflated sectors (`MULTI_BLOCK`) |
+| `war3map.j` | stored, single unit |
+| `war3map.wts` | stored, multi-block, **no sector table** |
 
-Because generator and reader share those primitives, the generator **cannot**
-catch a mistake in the crypto itself. It guards the assembly: the two offset
-systems, sector lengths, the enumeration ladder, branch selection. The crypto is
-guarded by three other means:
+The sectors really are compressed, with the `0x02` mask byte and a stored size
+below the data they hold — the generator carries a small DEFLATE encoder for
+exactly that reason, because a stored-block stream is always *larger* than its
+input and would leave the reader's compressed branch untested. It also puts the
+header at offset 512 behind an `HM3W` prefix, so member offsets have to be
+resolved against the archive header rather than the file.
 
-1. `crypto::tests::crypt_table_first_entries_are_stable` pins the table's opening
-   values, checked against an independent implementation of the documented rule;
-2. hash property tests, for case and separator insensitivity;
+## What `synthetic.w3x` cannot catch
+
+The generator encrypts the tables with the same cipher the reader decrypts with,
+and the two are an exact inverse pair. A mistake **shared by both** therefore
+round-trips perfectly and never shows up.
+
+That is not a hypothetical: this workspace once read every real Blizzard archive
+as noise while its own generated archive read back byte for byte. The cipher and
+the table keys were both wrong, and the generator reproduced both mistakes. The
+guards against that class of failure are:
+
+1. the pinned ciphertext and table-key hashes in `war3_archive::crypto`'s tests;
+2. the in-memory archive built by `war3_archive::archive`'s tests, which pins
+   the header offset, the table keys, the cipher and both sector branches in
+   every `cargo test`;
 3. running against real archives, below.
 
 ## Using the real samples
@@ -52,7 +67,74 @@ guarded by three other means:
 cargo run -p war3-cli -- map info "examples/lost-temple/(4)LostTemple.w3m"
 cargo run -p war3-cli -- map archive "examples/lost-temple/(4)LostTemple.w3m"
 cargo run -p war3-cli -- map terrain "examples/lost-temple/(4)LostTemple.w3m"
+cargo run -p war3-cli -- map list "examples/lost-temple/(4)LostTemple.w3m"
 ```
+
+The game's own archives work too — keep in mind they belong to Blizzard and are
+read in place, never copied here:
+
+```bash
+cargo run -p war3-cli -- map archive "D:\Warcraft3\war3.mpq"
+```
+
+## What the real samples report
+
+Measured on this machine, with the current reader:
+
+| File | Result |
+| --- | --- |
+| `war3.mpq` | hash table decrypts with **22084 of 32768 slots empty**; the block table lists **10684 members in use**; `(listfile)` and `(attributes)` are present but PKWare-imploded |
+| `War3xlocal.mpq` | 1133 block entries in use |
+| `(4)LostTemple.w3m` | 16 members enumerated by name; `.w3i` v18, `.w3e` v11 (161x161 tile points), `war3map.j` 72697 bytes of JASS |
+| `ydwe-sample-1.19.w3x` | `.w3i` v25, `.w3e` v11, `.w3u` object data, map name `YDWE的UI演示` resolved through the string table |
+
+Extraction is byte-identical to an independent implementation of the format for
+`war3map.w3i` (451 bytes), `war3map.w3e` (181524 bytes) and `war3map.j`
+(72697 bytes).
+
+## The four bugs this directory found
+
+Reading these files exposed four defects in `war3-archive`, all of which failed
+silently — every one of them produced plausible-looking output rather than an
+error:
+
+1. **The table keys were ASCII constants** `HASH` / `BLK#` (and byte-swapped on
+   top of that). The format keys both tables with
+   `HashString("(hash table)", MPQ_HASH_FILE_KEY)` and the same for
+   `(block table)`.
+2. **The cipher's key update folded in the plaintext.** The key walks its own
+   sequence; anything else makes real archives decrypt into noise.
+3. **Member offsets were treated as file-relative.** They are relative to the
+   archive header, like the table offsets, so every member of a map came back
+   shifted by the 512-byte `HM3W` prefix.
+4. **Sector compression was detected by a `0xFF` byte** that the format does not
+   use. A sector's first byte is a compression *mask* (`0x02` deflate, `0x08`
+   PKWare implode, ...), and whether it is compressed at all is decided by
+   comparing its stored size against the data it must hold.
+
+A fifth, smaller one: an uncompressed multi-block member has **no** sector
+offset table, and the reader used to parse one anyway.
+
+`examples/fresh/README.md` describes the clean control sample that the earlier
+misdiagnosis asked for. It is no longer a blocker; it is still worth keeping for
+new parser work.
+
+## Known gap: PKWare implode
+
+Sectors with the `0x08` mask byte are imploded with the PKWare Data Compression
+Library, and `war3-archive` does not implement "explode" yet. It reports this
+plainly:
+
+```text
+WAR3MAP.WTS   ?  (decompression failed: unsupported compression mask 0x00000008)
+```
+
+That costs two things today: a map's `war3map.wts` (its string table, so
+`TRIGSTR_nnn` references stay unresolved), and Blizzard's own `(listfile)` and
+`(attributes)`, which is why `war3.mpq` enumerates only the names it can guess
+rather than all 10684 members. Huffman (`0x01`), bzip2 (`0x10`) and ADPCM
+(`0x40`, `0x80`) are likewise reported as unsupported; none of them occur in the
+map samples, but bzip2 does occur in some community archives.
 
 ## Licensing and provenance
 
@@ -61,57 +143,7 @@ cargo run -p war3-cli -- map terrain "examples/lost-temple/(4)LostTemple.w3m"
 | maps you built yourself | committed, used as golden files |
 | community maps | need the author's permission to redistribute; by default used for local checks only |
 | maps bundled with YDWE | the repository is GPL-3.0, so **local verification only** |
-| Blizzard's own maps | **local verification only**, never redistributed |
+| Blizzard's own maps and archives | **local verification only**, never redistributed |
 
 Every `.w3x` and `.w3m` file here is therefore excluded by `.gitignore`. To get a
 sample, either place your own, or generate the synthetic archive.
-
-## Known issue: the real maps cannot be read
-
-**Every map under `D:\Warcraft3\` — including `(4)LostTemple.w3m` and
-`ydwe-sample-1.19.w3x` — yields no member files.**
-
-### Ruled out
-
-| Stage | State | Evidence |
-| --- | --- | --- |
-| header discovery at offset 512 | correct | header fields are self-consistent: `hash_pos + hash_size*16 == block_pos`, and `block_pos + block_size*16 == archive_size` |
-| crypt table generation | correct | matches an independent implementation value for value |
-| `hash_string` | correct | matches an independent implementation value for value (`WAR3MAP.W3I` gives `TABLE_OFFSET=987145CE`, `HASH_A=33E887B7`) |
-| table decryption | correct | `encrypt` composed with `decrypt` is the identity |
-| hash lookup and the enumeration ladder | correct | the synthetic archive resolves all three names to the right block indices |
-| sector decryption and zlib | correct | the synthetic archive reads all three storage layouts back byte-identically |
-
-### What fails
-
-**The block tables of the real maps and of the game's own archives decrypt into
-random bytes**: member offsets come out as values such as `0x18B2B860` and
-`0x63EB8C10`, far beyond the file length.
-
-The decisive measurement: `war3.mpq` has a 32768-entry hash table, and a valid one
-is mostly unused slots marked `0xFFFFFFFF`. Measured unused count: **0 of 4096**
-for all 256 candidate low bytes of the key. The synthetic archive measures 61 of
-64 under the same count.
-
-So the data at that offset is not a hash table encrypted in the documented way.
-
-Keys tried and rejected: `BLK#`, `HASH`, `(block)`, `(hash)`, the empty key,
-`(block table)`, `(hash table)`, and a sweep over the low byte. The independent
-Python implementation `mpyq` fails on the same files: `Encryption is not supported
-yet` for `war3.mpq` and `Invalid file header` for the maps.
-
-### Conclusion
-
-The implementation has been validated stage by stage against a conforming archive,
-so this is a property of **these files**: a map protector, a repackaging tool, or
-an undocumented key derivation step.
-
-### Next step: a clean sample
-
-Produce a map with the local `World Editor.exe` — new map, default size, save —
-and place it in [`../fresh/`](../fresh/README.md). The commands to run and the
-criteria to judge them by are there.
-
-```bash
-cargo run --example dump_mpq -p war3-archive -- "<map or archive>"
-```

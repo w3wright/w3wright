@@ -239,26 +239,33 @@ impl Map {
     }
 }
 
-/// Cross-checks the terrain size against the playable size in the map info.
+/// Cross-checks the terrain size against the **whole** map size in the map info.
 ///
-/// The two differ by one: `.w3e` counts tile **points**, which is tiles plus one,
-/// while `.w3i` counts tiles. This is the most common off-by-one in the format.
+/// Two off-by-one traps meet here, and getting either wrong produces a warning
+/// on every real ladder map:
+///
+/// 1. `.w3e` counts tile **points**, which is tiles plus one.
+/// 2. The size to compare against is the *total* map, not the playable area.
+///    `(4)LostTemple.w3m` is playable 124x124 with unplayable edges 16/20/18/18,
+///    so 16 + 124 + 20 = 160 tiles across, i.e. 161 tile points — which is what
+///    its `.w3e` holds. Comparing the playable 124 against 161 reports a
+///    mismatch on a file that is perfectly consistent.
 fn cross_check_terrain_size(
     metadata: &MapInfo,
     terrain: &mut war3_terrain::Terrain,
     diagnostics: &mut Diagnostics,
 ) {
-    let expected_points_x = metadata.playable_width + 1;
-    let expected_points_y = metadata.playable_height + 1;
+    let expected_points_x = metadata.width() + 1;
+    let expected_points_y = metadata.height() + 1;
     if terrain.width as i32 != expected_points_x || terrain.height as i32 != expected_points_y {
         diagnostics.push(war3_core::Diagnostic::warn(
             war3_core::DiagnosticCode::W3eRecordSizeMismatch,
             format!(
-                "size mismatch: .w3i says the playable area is {}x{} tiles (so {}x{} tile points) \
-                 but .w3e has {}x{} tile points; the editor may have resized the map, or a \
+                "size mismatch: .w3i describes a map of {}x{} tiles (so {}x{} tile points) but \
+                 .w3e has {}x{} tile points; the editor may have resized the map, or a \
                  third-party tool damaged one of the two",
-                metadata.playable_width,
-                metadata.playable_height,
+                metadata.width(),
+                metadata.height(),
                 expected_points_x,
                 expected_points_y,
                 terrain.width,
@@ -326,6 +333,15 @@ mod tests {
     use super::*;
 
     fn minimal_w3i() -> Vec<u8> {
+        minimal_w3i_sized([0, 0, 0, 0], 32, 32)
+    }
+
+    /// A `.w3i` with the given unplayable edges and playable area.
+    fn minimal_w3i_sized(
+        unplayable: [i32; 4],
+        playable_width: i32,
+        playable_height: i32,
+    ) -> Vec<u8> {
         let mut b = Vec::new();
         let i32s = |b: &mut Vec<u8>, v: i32| b.extend_from_slice(&v.to_le_bytes());
         let strs = |b: &mut Vec<u8>, s: &str| {
@@ -342,11 +358,11 @@ mod tests {
         for _ in 0..8 {
             b.extend_from_slice(&0f32.to_le_bytes());
         }
-        for _ in 0..4 {
-            i32s(&mut b, 0); // unplayable A B C D
+        for v in unplayable {
+            i32s(&mut b, v); // unplayable A B C D
         }
-        i32s(&mut b, 32); // playable width
-        i32s(&mut b, 32); // playable height
+        i32s(&mut b, playable_width);
+        i32s(&mut b, playable_height);
         i32s(&mut b, 0);
         b.push(b'L');
         i32s(&mut b, -1);
@@ -415,6 +431,41 @@ mod tests {
         assert_eq!(terrain.height, 33);
         // A 32x32 playable area means 33x33 tile points, so no size diagnostic.
         assert!(!map
+            .diagnostics
+            .items()
+            .iter()
+            .any(|d| d.message.contains("size mismatch")));
+    }
+
+    #[test]
+    fn terrain_size_is_compared_against_the_whole_map_not_the_playable_area() {
+        // `(4)LostTemple.w3m`'s geometry: playable 32x32 with unplayable edges
+        // 16/20/18/18, so 16 + 32 + 20 = 68 tiles across and down, i.e. 69x69
+        // tile points. Comparing the playable 32 against 69 warns on a map that
+        // is perfectly consistent.
+        let source = MemoryMapSource::new()
+            .with("war3map.w3i", minimal_w3i_sized([16, 20, 18, 18], 32, 32))
+            .with("war3map.w3e", minimal_w3e(69, 69));
+        let map = Map::from_source(&source).unwrap();
+        assert_eq!(map.metadata.width(), 68);
+        assert_eq!(map.metadata.height(), 68);
+        assert!(
+            !map.diagnostics
+                .items()
+                .iter()
+                .any(|d| d.message.contains("size mismatch")),
+            "{:?}",
+            map.diagnostics.items()
+        );
+    }
+
+    #[test]
+    fn a_genuine_terrain_size_mismatch_is_still_reported() {
+        let source = MemoryMapSource::new()
+            .with("war3map.w3i", minimal_w3i())
+            .with("war3map.w3e", minimal_w3e(64, 64));
+        let map = Map::from_source(&source).unwrap();
+        assert!(map
             .diagnostics
             .items()
             .iter()

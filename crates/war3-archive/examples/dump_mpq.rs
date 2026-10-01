@@ -1,7 +1,7 @@
 //! Prints an archive's structure and reads a couple of members.
 //!
 //! This is the first thing to run when a map will not open: it shows whether the
-//! tables decrypted into something plausible (member offsets inside the file,
+//! tables decrypted into something plausible (member offsets inside the archive,
 //! some hash slots unused) before any format parser is involved.
 //!
 //! ```text

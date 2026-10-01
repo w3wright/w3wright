@@ -78,79 +78,89 @@ impl std::error::Error for CodecError {}
 // Compression masks
 // ---------------------------------------------------------------------------
 
-/// No compression.
+/// No compression: the sector is stored as it is.
 pub const COMPRESSION_NONE: u32 = 0x0000_0000;
-/// zlib. The common case for map members.
+/// Huffman coding.
+pub const COMPRESSION_HUFFMAN: u32 = 0x0000_0001;
+/// Deflate (RFC 1951), wrapped in a zlib header. The common case for maps.
 pub const COMPRESSION_ZLIB: u32 = 0x0000_0002;
+/// PKWare Data Compression Library "implode".
+pub const COMPRESSION_PKWARE: u32 = 0x0000_0008;
 /// bzip2.
 pub const COMPRESSION_BZIP2: u32 = 0x0000_0010;
-/// PKWare implode.
-pub const COMPRESSION_PKWARE: u32 = 0x0000_0100;
-/// LZMA.
-///
-/// Its value is `0x12`, the combination of zlib and bzip2, rather than a bit of
-/// its own. Compression masks are priority lists, so reusing a combination is
-/// how the format grew; inventing a distinct bit here would be wrong.
-pub const COMPRESSION_LZMA: u32 = 0x0000_0012;
+/// IMA ADPCM, mono. Only ever used for audio.
+pub const COMPRESSION_ADPCM_MONO: u32 = 0x0000_0040;
+/// IMA ADPCM, stereo. Only ever used for audio.
+pub const COMPRESSION_ADPCM_STEREO: u32 = 0x0000_0080;
 
 /// Bits that name a compression *algorithm*.
 ///
-/// # Two different bits
+/// # The mask is per sector, and it is not the block flags
 ///
-/// | Bit | Meaning |
+/// The low byte of a block table entry's flags and a sector's leading
+/// compression byte are two different things, and this crate used to confuse
+/// them:
+///
+/// | Where | What it says |
 /// | --- | --- |
-/// | `0x0000_0200` (`MPQ_FILE_COMPRESSED`) | "this member is compressed"; carries no algorithm |
-/// | low byte (`0x02`, `0x10`, `0x100`) | which algorithm, as a priority list |
+/// | block flags `0x0000_0200` (`MPQ_FILE_COMPRESSED`) | "this member is compressed"; carries no algorithm |
+/// | block flags `0x0000_0100` (`MPQ_FILE_IMPLODED`) | "compressed, but not with the DEFLATE family"; also no algorithm |
+/// | a sector's first byte | which algorithm *that sector* used, as a priority list |
 ///
-/// In real archives a zlib member has flags such as `0x04000200` — the
-/// compressed bit is set and the low byte is *zero*. The algorithm therefore
-/// cannot be read off the flags; it is found by trying. This constant is
-/// consequently only useful for display.
-pub const COMPRESSION_METHOD_MASK: u32 =
-    COMPRESSION_ZLIB | COMPRESSION_BZIP2 | COMPRESSION_PKWARE | COMPRESSION_LZMA;
+/// A real zlib member has flags such as `0x0400_0200`, whose low byte is zero —
+/// the algorithm is only in the sectors. [`crate::archive::BlockEntry::compression_name`]
+/// consequently reports "algorithm not declared" for almost every real member,
+/// which is correct: it is discovered per sector while reading.
+pub const COMPRESSION_METHOD_MASK: u32 = 0x0000_00FF;
 
 /// `MPQ_FILE_COMPRESSED`: "this member is compressed".
 pub const COMPRESSION_FLAG_COMPRESSED: u32 = 0x0000_0200;
 
 /// Whether a mask means "stored uncompressed".
 ///
-/// The test is whether `MPQ_FILE_COMPRESSED` is clear, *not* whether the low
-/// byte is zero: a real zlib member has flags `0x04000200`, whose low byte is
-/// zero.
+/// This interprets **block flags**, not a sector mask. The test is whether
+/// `MPQ_FILE_COMPRESSED` is clear, *not* whether the low byte is zero: a real
+/// zlib member has flags `0x04000200`, whose low byte is zero.
 #[must_use]
 pub const fn is_uncompressed_mask(mask: u32) -> bool {
     mask & COMPRESSION_FLAG_COMPRESSED == 0
 }
 
-/// Decompresses according to a member's flags.
+/// Decompresses one sector according to its leading compression mask byte.
 ///
-/// - `MPQ_FILE_COMPRESSED` clear: the data is stored, returned as is.
-/// - set: decompressed as zlib.
-/// - anything else: [`CodecError::Unsupported`].
+/// - [`COMPRESSION_NONE`]: the data is stored, returned as is.
+/// - [`COMPRESSION_ZLIB`]: inflated, after the two-byte zlib header.
+/// - anything else that this crate cannot do: [`CodecError::Unsupported`].
 ///
-/// `expected` is the length the container declared. It is checked, because an
-/// unchecked mismatch produces data of the wrong length that only fails much
-/// later.
+/// The mask is a priority list — when compressing, the listed algorithms are
+/// applied in order, so decompression peels them off in reverse. Deflate is
+/// applied last and therefore sits outermost, which is what lets a combined
+/// mask be handled by inflating first and recursing on the remainder.
+///
+/// `expected` is the length the container declared for the sector. It is
+/// checked, because an unchecked mismatch produces data of the wrong length
+/// that only fails much later.
 pub fn decompress(data: &[u8], mask: u32, expected: usize) -> Result<Vec<u8>, CodecError> {
-    if is_uncompressed_mask(mask) {
+    if mask == COMPRESSION_NONE {
         return Ok(data.to_vec());
     }
 
-    // If the low byte names algorithms and zlib is not among them, say so
-    // instead of handing, say, a bzip2 stream to the zlib decoder.
-    let declared = mask & COMPRESSION_METHOD_MASK & 0xFF;
-    if declared != 0 && declared & COMPRESSION_ZLIB == 0 {
-        return Err(CodecError::Unsupported(mask));
+    if mask & COMPRESSION_ZLIB != 0 {
+        let out = zlib_decompress(data, expected)?;
+        let rest = mask & !COMPRESSION_ZLIB;
+        if rest != COMPRESSION_NONE {
+            return decompress(&out, rest, expected);
+        }
+        if out.len() != expected {
+            return Err(CodecError::SizeMismatch {
+                expected,
+                got: out.len(),
+            });
+        }
+        return Ok(out);
     }
 
-    let out = zlib_decompress(data, expected)?;
-    if out.len() != expected {
-        return Err(CodecError::SizeMismatch {
-            expected,
-            got: out.len(),
-        });
-    }
-    Ok(out)
+    Err(CodecError::Unsupported(mask))
 }
 
 /// Decompresses a zlib stream (RFC 1950 wrapper around RFC 1951 data).
@@ -543,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn real_world_masks_are_classified_correctly() {
+    fn real_world_block_flags_are_classified_correctly() {
         // Values taken from real archives. `0x200` is the compressed flag and
         // says nothing about the algorithm; the low byte of a zlib member is
         // often zero.
@@ -564,29 +574,46 @@ mod tests {
     }
 
     #[test]
-    fn compressed_flag_low_byte_is_zero_yet_data_is_still_zlib() {
-        // Regression guard: treating "low byte has no algorithm bits" as "stored"
-        // made every `0x04000200` sector come back raw.
-        let out = decompress(ZLIB_HELLO_WORLD, 0x0400_0200, 11).unwrap();
+    fn deflate_sector_mask_is_inflated() {
+        // The mask argument is the sector's leading compression-mask byte, not
+        // the member's block flags. Real map sectors start with `0x02`.
+        let out = decompress(ZLIB_HELLO_WORLD, COMPRESSION_ZLIB, 11).unwrap();
         assert_eq!(out, b"hello world");
     }
 
     #[test]
-    fn explicitly_non_zlib_low_byte_is_reported_as_unsupported() {
+    fn a_combined_mask_peels_zlib_off_first() {
+        // Priority lists are decompressed in reverse: deflate is applied last
+        // when compressing, so it comes off first. The remainder is then
+        // reported as unsupported rather than fed to the wrong decoder.
         assert_eq!(
-            decompress(b"x", 0x0000_0210, 1),
-            Err(CodecError::Unsupported(0x210))
+            decompress(ZLIB_HELLO_WORLD, COMPRESSION_ZLIB | COMPRESSION_BZIP2, 11),
+            Err(CodecError::Unsupported(COMPRESSION_BZIP2))
+        );
+    }
+
+    #[test]
+    fn algorithms_this_crate_cannot_do_are_reported_as_unsupported() {
+        // Every one of these occurs in real Warcraft III files: `.wts` members
+        // and `war3.mpq`'s `(listfile)` are imploded.
+        assert_eq!(
+            decompress(b"x", COMPRESSION_PKWARE, 1),
+            Err(CodecError::Unsupported(COMPRESSION_PKWARE))
         );
         assert_eq!(
-            decompress(b"x", 0x0000_0218, 1),
-            Err(CodecError::Unsupported(0x218))
+            decompress(b"x", COMPRESSION_HUFFMAN, 1),
+            Err(CodecError::Unsupported(COMPRESSION_HUFFMAN))
+        );
+        assert_eq!(
+            decompress(b"x", COMPRESSION_BZIP2, 1),
+            Err(CodecError::Unsupported(COMPRESSION_BZIP2))
         );
     }
 
     #[test]
     fn size_mismatch_is_reported_not_silently_accepted() {
         assert!(matches!(
-            decompress(ZLIB_HELLO_WORLD, 0x0000_0202, 999),
+            decompress(ZLIB_HELLO_WORLD, COMPRESSION_ZLIB, 999),
             Err(CodecError::SizeMismatch { expected: 999, .. })
         ));
     }

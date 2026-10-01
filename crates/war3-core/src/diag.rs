@@ -48,6 +48,11 @@ pub enum DiagnosticCode {
     MpqHeaderOffset,
     /// The archive has no usable `(listfile)`.
     MpqNoListfile,
+    /// `(listfile)` held bytes that are not UTF-8 and were replaced.
+    ///
+    /// A listfile written by a non-English World Editor is often in a local
+    /// code page, so the names survive but not byte-for-byte.
+    MpqListfileNotUtf8,
     /// A member uses an unsupported compression algorithm.
     MpqUnsupportedCompression,
     /// A member uses an unsupported encryption scheme.
@@ -93,6 +98,7 @@ impl DiagnosticCode {
         match self {
             Self::MpqHeaderOffset => "mpq.header-offset",
             Self::MpqNoListfile => "mpq.no-listfile",
+            Self::MpqListfileNotUtf8 => "mpq.listfile-not-utf8",
             Self::MpqUnsupportedCompression => "mpq.unsupported-compression",
             Self::MpqUnsupportedEncryption => "mpq.unsupported-encryption",
             Self::MpqHashCollisionSkipped => "mpq.hash-collision-skipped",

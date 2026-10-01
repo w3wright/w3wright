@@ -7,6 +7,10 @@ This repository is the implementation of the design captured in `docs/`. That
 design is authoritative; this README only says where the code is, how to run it,
 and how far along it is.
 
+> **Note**: `docs/` is not in the tree. The design document is referenced as
+> authoritative but has never been committed, which is a gap worth closing — the
+> conventions below are currently the only place some of it is written down.
+
 > Target game version: **1.27**
 > CLI binary: **`war3`**, crate prefix: **`war3-*`**
 
@@ -15,7 +19,8 @@ and how far along it is.
 ## Status
 
 Phase 1 covers the W3X parser: everything needed to open a `.w3x` and read the
-metadata-class and terrain-class files inside it.
+metadata-class and terrain-class files inside it. It reads real maps and real
+Blizzard archives end to end.
 
 | Crate | State | Contents |
 | --- | --- | --- |
@@ -28,9 +33,27 @@ metadata-class and terrain-class files inside it.
 | `war3-object` | not started | object data (`.w3u` and friends) |
 | writing `.w3x` | not started | the build direction |
 
-**192 unit tests pass and `cargo clippy --all-targets` is clean.** The dependency
+**199 unit tests pass and `cargo clippy --all-targets` is clean.** The dependency
 set is empty apart from the crates in this workspace, including the zlib
 decompressor, so the core builds for WASM and with a plain Rust toolchain.
+
+### What it reads today
+
+| Target | Result |
+| --- | --- |
+| `D:\Warcraft3\war3.mpq` | hash table decrypts (22084 of 32768 slots empty); **10684 members** in the block table |
+| `D:\Warcraft3\War3xlocal.mpq` | 1133 members |
+| `(4)LostTemple.w3m` | 16 members by name; `.w3i` v18, `.w3e` v11 (161x161 tile points), `war3map.j` 72697 bytes of JASS |
+| `ydwe-sample-1.19.w3x` | `.w3i` v25, `.w3e` v11, `.w3u`, and a non-ASCII map name via the string table |
+
+Extraction is byte-identical to an independent implementation of the format for
+`war3map.w3i`, `war3map.w3e` and `war3map.j`.
+
+**Not yet supported: PKWare implode** (`0x08` sectors), which is what a map's
+`war3map.wts` and Blizzard's own `(listfile)` use. Huffman, bzip2 and ADPCM are
+reported as unsupported too. See
+[`examples/lost-temple/README.md`](examples/lost-temple/README.md).
+
 
 ---
 
@@ -109,10 +132,16 @@ silent — the parser reports success and produces wrong data.
    a 14-bit level; reading it as `i16` and masking afterwards hits sign extension.
 4. **Preserve bytes whose meaning is unknown.** Reserved bits survive a round trip
    verbatim rather than being normalised away.
-5. **Keep the two coordinate systems apart.** MPQ table offsets are relative to
-   the header, while a member's offset is relative to the file. Mixing them
-   yields data shifted by 512 bytes, with no error.
-6. **No dependencies unless there is a reason.** The core, terrain and metadata
+5. **Every offset in the format is relative to the archive header.** That covers
+   the table positions in the header *and* a block entry's member position, while
+   the `HM3W` prefix means the header is usually at 512 rather than 0. Reading a
+   member without adding the header offset yields data shifted by 512 bytes, with
+   no error.
+6. **Never trust encryption and decryption to validate each other.** They are an
+   exact inverse pair, so a writer and a reader that share a mistake round-trip
+   perfectly. Pin pinned ciphertext against a real archive instead; this is why
+   `war3-archive`'s tests carry fixed vectors.
+7. **No dependencies unless there is a reason.** The core, terrain and metadata
    crates have none; the MPQ crate implements inflate itself so that the
    workspace stays pure Rust and reaches WASM.
 
@@ -127,31 +156,38 @@ licences, and community maps need the author's permission before redistribution.
 
 One sample is generated locally instead:
 `cargo run --example make_synthetic -p war3-archive` writes a structurally valid MPQ
-archive — encrypted tables, three storage layouts, and deliberately no
-`(listfile)` — which is what isolates "the reader is wrong" from "this particular
-file is unusual". See [`examples/lost-temple/README.md`](examples/lost-temple/README.md).
+archive — encrypted tables, four storage layouts, sectors that are genuinely
+deflated and sectors stored raw, and deliberately no `(listfile)`. See
+[`examples/lost-temple/README.md`](examples/lost-temple/README.md).
 
 ---
 
-## Known issue: table decryption on the local installation
+## On the misdiagnosis this README used to contain
 
-Reading a synthetic archive end to end works: header discovery, table
-decryption, hash lookup, name enumeration, sector decryption and zlib
-decompression all produce content identical to what was written. The crypt table
-and the filename hash also match an independent implementation value for value.
+Earlier revisions of this file and of `examples/lost-temple/README.md` claimed
+that every real file on this machine was protected or repackaged, that a map
+protector or an undocumented key derivation was at fault, and that **"a clean
+sample is needed to continue"**. That was wrong. The files were ordinary; the
+reader had four defects, each of which failed silently:
 
-For the real files on this machine, however — the maps under `D:\Warcraft3\` and
-the game's own `war3.mpq`, `War3x.mpq` and `War3xLocal.mpq` — the hash and block
-tables decrypt into random bytes. The decisive measurement: `war3.mpq` has a
-32768-entry hash table in which the number of unused slots is **zero**, whereas a
-valid archive is mostly unused slots (the synthetic archive measures 61 of 64).
+1. the two tables were keyed with ASCII constants (`HASH`, `BLK#`) instead of
+   `HashString("(hash table)", MPQ_HASH_FILE_KEY)` and the same for
+   `(block table)`;
+2. the cipher's key update folded in the plaintext instead of walking its own
+   sequence;
+3. member offsets were read as file-relative rather than archive-relative;
+4. a sector's `0xFF` first byte was treated as a "compressed" marker; the format
+   has no such byte, and decides between a stored and a compressed sector by
+   comparing the stored size against the data the sector must hold.
 
-So those files' tables are not stored the way the format documentation describes.
-Possible causes are a map protector, a repackaging tool, or a key derivation step
-that is not documented. **A clean sample is needed to continue**, and
-[`examples/fresh/README.md`](examples/fresh/README.md) describes how to produce one
-and what to look for.
+The old evidence for "these files are unusual" was that the hash table decrypted
+to zero empty slots out of 32768, where a valid table is mostly empty. That
+measurement was correct and the inference was not: it is exactly what a wrong key
+produces. The decisive control sample was already in the repository and could not
+help, because the generator shared the reader's cipher and its keys — which the
+old README even warned about, without noticing that it applied to the very check
+being used. Real archives were the only thing that could settle it, and they now
+serve as the reference: see [`examples/lost-temple/README.md`](examples/lost-temple/README.md)
+for the measured evidence and for the pinned vectors in
+`war3_archive::crypto`'s tests that keep this from recurring.
 
-This does not block the rest of Phase 1: each format parser has unit tests over
-byte streams it constructs itself. What is missing is the end-to-end run against a
-real map.
