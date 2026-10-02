@@ -10,6 +10,8 @@
 
 use std::fmt;
 
+pub mod pkware;
+
 /// Why decompression failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodecError {
@@ -43,6 +45,26 @@ pub enum CodecError {
     },
     /// The compression method is recognised but not implemented.
     Unsupported(u32),
+    /// A PKWARE-imploded stream declared a compression type other than
+    /// `CMP_BINARY` (0) or `CMP_ASCII` (1).
+    ///
+    /// Distinct from [`Self::BadCompressionMethod`], which is about zlib's method
+    /// byte: the two formats both have a "method" field and they do not share a
+    /// value space.
+    BadPkwareMode(u8),
+    /// A PKWARE-imploded stream declared a dictionary size other than 4, 5 or 6
+    /// bits (1 KiB, 2 KiB, 4 KiB).
+    BadDictionarySize(u32),
+    /// A literal in a PKWARE-imploded stream decoded to a symbol the code tables
+    /// do not define.
+    BadLiteralCode(u8),
+    /// A PKWARE match pointed outside the output produced so far.
+    BadMatchDistance {
+        /// The distance the stream asked for.
+        distance: usize,
+        /// How much had been produced when it was asked for.
+        produced: usize,
+    },
 }
 
 impl fmt::Display for CodecError {
@@ -68,6 +90,28 @@ impl fmt::Display for CodecError {
                 )
             }
             Self::Unsupported(m) => write!(f, "unsupported compression mask {m:#010X}"),
+            Self::BadPkwareMode(m) => {
+                write!(f, "invalid PKWare implode compression mode {m} (expected 0 or 1)")
+            }
+            Self::BadDictionarySize(bits) => {
+                write!(
+                    f,
+                    "invalid PKWare implode dictionary size {bits} bits (expected 4, 5 or 6)"
+                )
+            }
+            Self::BadLiteralCode(peek) => {
+                write!(
+                    f,
+                    "invalid PKWare literal code starting {peek:#010b}"
+                )
+            }
+            Self::BadMatchDistance {
+                distance,
+                produced,
+            } => write!(
+                f,
+                "PKWare match distance {distance} exceeds the {produced} bytes produced so far"
+            ),
         }
     }
 }
@@ -130,6 +174,7 @@ pub const fn is_uncompressed_mask(mask: u32) -> bool {
 ///
 /// - [`COMPRESSION_NONE`]: the data is stored, returned as is.
 /// - [`COMPRESSION_ZLIB`]: inflated, after the two-byte zlib header.
+/// - [`COMPRESSION_PKWARE`]: exploded, including the format's own two-byte header.
 /// - anything else that this crate cannot do: [`CodecError::Unsupported`].
 ///
 /// The mask is a priority list — when compressing, the listed algorithms are
@@ -151,6 +196,24 @@ pub fn decompress(data: &[u8], mask: u32, expected: usize) -> Result<Vec<u8>, Co
         if rest != COMPRESSION_NONE {
             return decompress(&out, rest, expected);
         }
+        if out.len() != expected {
+            return Err(CodecError::SizeMismatch {
+                expected,
+                got: out.len(),
+            });
+        }
+        return Ok(out);
+    }
+
+    if mask & COMPRESSION_PKWARE != 0 {
+        let out = pkware::explode(data, expected)?;
+        let rest = mask & !COMPRESSION_PKWARE;
+        if rest != COMPRESSION_NONE {
+            return decompress(&out, rest, expected);
+        }
+        // `explode` already refuses to over- or under-run `expected`, but the
+        // check is repeated here so that the guarantee lives at one place for
+        // every method rather than being a property of one of them.
         if out.len() != expected {
             return Err(CodecError::SizeMismatch {
                 expected,
@@ -594,12 +657,10 @@ mod tests {
 
     #[test]
     fn algorithms_this_crate_cannot_do_are_reported_as_unsupported() {
-        // Every one of these occurs in real Warcraft III files: `.wts` members
-        // and `war3.mpq`'s `(listfile)` are imploded.
-        assert_eq!(
-            decompress(b"x", COMPRESSION_PKWARE, 1),
-            Err(CodecError::Unsupported(COMPRESSION_PKWARE))
-        );
+        // This list used to include PKWare implode, on the grounds that `.wts`
+        // members and `war3.mpq`'s `(listfile)` use it. It is implemented now, so
+        // those two are no longer examples of an unsupported method — and a stale
+        // entry left here would have gone on asserting the opposite.
         assert_eq!(
             decompress(b"x", COMPRESSION_HUFFMAN, 1),
             Err(CodecError::Unsupported(COMPRESSION_HUFFMAN))
@@ -607,6 +668,19 @@ mod tests {
         assert_eq!(
             decompress(b"x", COMPRESSION_BZIP2, 1),
             Err(CodecError::Unsupported(COMPRESSION_BZIP2))
+        );
+    }
+
+    /// Implode reaches the PKWare decoder rather than the generic refusal.
+    ///
+    /// The bytes are a valid header and nothing usable after it, so the decoder
+    /// fails on the stream — which is the point: it is no longer `Unsupported`.
+    #[test]
+    fn implode_is_routed_to_the_pkware_decoder() {
+        let error = decompress(&[0u8, 4, 0x00, 0x00, 0x00], COMPRESSION_PKWARE, 64).unwrap_err();
+        assert!(
+            !matches!(error, CodecError::Unsupported(_)),
+            "implode must not report as unsupported any more, got {error:?}"
         );
     }
 
