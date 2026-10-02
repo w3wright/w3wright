@@ -33,6 +33,7 @@ pub mod layout;
 pub mod objects_text;
 pub mod project;
 pub mod raw;
+pub mod script_text;
 pub mod units_text;
 pub mod w3i_text;
 

@@ -180,7 +180,7 @@ pub fn extract(map: &Path, dir: &Path, drop_unnamed: bool) -> Result<ExtractRepo
 /// serialiser that is right about 188 maps out of 190 is useful; one that is
 /// quietly wrong about 2 is not.
 fn text_form(name: &str, content: &[u8], diagnostics: &mut Diagnostics) -> Result<Option<String>> {
-    let Some(codec) = codecs::codec_for(name) else {
+    let Some(codec) = codecs::codec_for_member(name, content) else {
         return Ok(None);
     };
     let text = match (codec.to_text)(name, content) {
@@ -216,6 +216,37 @@ fn text_form(name: &str, content: &[u8], diagnostics: &mut Diagnostics) -> Resul
             Ok(None)
         }
     }
+}
+
+/// The bytes a `[text]` member produces, read back from the file on disk.
+///
+/// One routine for all three callers — `build`, its self-verification, and
+/// `validate` — because they must agree about what a text member reads back as.
+/// When they disagree, "build succeeded" and "the reader gets the same bytes"
+/// stop meaning the same thing.
+///
+/// The UTF-8 requirement is why script source cannot always be text: a script
+/// whose bytes are not UTF-8 has no text form at all, and `extract` keeps it
+/// binary rather than serialising it into something `build` would later refuse.
+///
+/// The message does not name the member, because every caller already prefixes
+/// its own error line with `{name}:`; the path is carried instead, which is the
+/// part the member name does not convey.
+fn text_member_bytes(dir: &Path, name: &str, rel: &str) -> Result<Vec<u8>> {
+    let bytes = read_project_file(dir, rel)?;
+    let text = String::from_utf8(bytes).map_err(|e| {
+        Error::msg(format!(
+            "{rel}: a [text] member must be UTF-8 ({e}); move it to [binary] in war3.toml to \
+             carry it verbatim"
+        ))
+    })?;
+    let codec = codecs::codec_for_member(name, text.as_bytes()).ok_or_else(|| {
+        Error::msg(
+            "listed as text, but this build has no text form for it; move it to [binary] to \
+             build it from its current bytes",
+        )
+    })?;
+    (codec.from_text)(name, &text)
 }
 
 /// Builds a map back from a source project.
@@ -265,15 +296,7 @@ pub fn build(dir: &Path, out: Option<&Path>) -> Result<BuildReport> {
     let mut builder = ArchiveBuilder::with_prefix(prefix)?;
 
     for (name, rel) in &config.text {
-        let codec = codecs::codec_for(name).ok_or_else(|| {
-            Error::msg(format!(
-                "war3.toml lists {name} in [text], but this build has no text form for it yet; \
-                 move it to [binary] to build it from its current bytes"
-            ))
-        })?;
-        let text = String::from_utf8(read_project_file(dir, rel)?)
-            .map_err(|e| Error::msg(format!("{rel}: the text form is not UTF-8: {e}")))?;
-        builder.add_stored(name.clone(), (codec.from_text)(name, &text)?);
+        builder.add_stored(name.clone(), text_member_bytes(dir, name, rel)?);
     }
 
     for (name, rel) in &config.binary {
@@ -340,15 +363,7 @@ fn verify(output: &Path, dir: &Path, config: &Config) -> Result<Vec<String>> {
     // A text member is compared by serialising the text again: the file on disk is
     // the source now, and what matters is the bytes it produces.
     for (name, rel) in &config.text {
-        let Some(codec) = codecs::codec_for(name) else {
-            mismatched.push(format!("{name}: listed as text but has no text form"));
-            continue;
-        };
-        let expected = read_project_file(dir, rel).and_then(|bytes| {
-            let text = String::from_utf8(bytes)
-                .map_err(|e| Error::msg(format!("{rel}: not UTF-8: {e}")))?;
-            (codec.from_text)(name, &text)
-        });
+        let expected = text_member_bytes(dir, name, rel);
         match (expected, rebuilt.read_file(name)) {
             (Ok(expected), Ok(actual)) if expected == actual => {}
             (Ok(expected), Ok(actual)) => mismatched.push(format!(
@@ -445,28 +460,8 @@ pub fn validate(dir: &Path) -> Result<ValidateReport> {
     }
 
     for (name, rel) in &config.text {
-        let Some(codec) = codecs::codec_for(name) else {
-            errors.push(format!(
-                "{name}: listed as text, but this build has no text form for it"
-            ));
-            continue;
-        };
-        let bytes = match read_project_file(dir, rel) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                errors.push(format!("{name}: {e}"));
-                continue;
-            }
-        };
-        let body = match String::from_utf8(bytes) {
-            Ok(body) => body,
-            Err(e) => {
-                errors.push(format!("{rel}: the text form is not UTF-8: {e}"));
-                continue;
-            }
-        };
-        if let Err(e) = (codec.from_text)(name, &body) {
-            errors.push(format!("{name}: the text form does not read back: {e}"));
+        if let Err(e) = text_member_bytes(dir, name, rel) {
+            errors.push(format!("{name}: {e}"));
         }
     }
 
@@ -780,8 +775,13 @@ flags = \"0\"
             report
                 .errors
                 .iter()
-                .any(|e| e.contains("does not read back")),
-            "{:?}",
+                .any(|e| e.contains("the file is not a complete text form")),
+            "the broken w3i text must be reported: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("war3map.w3e")),
+            "the missing binary member must be reported too: {:?}",
             report.errors
         );
     }

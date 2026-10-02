@@ -1,4 +1,4 @@
-# w3wright
+﻿# w3wright
 
 [English](README.md) | **中文**
 
@@ -29,15 +29,15 @@ Phase 1 覆盖 W3X 解析器：打开一张 `.w3x`，读出里面的元数据类
 | `war3-terrain` | ✅ | `.w3e` 的 v11 与 v12 两种布局，以及 SYLK 解析 |
 | `war3-meta` | ✅ | 从游戏安装的 `*MetaData.slk` 读对象字段元数据、`TriggerData.txt` 触发定义、编辑器数据类型表 |
 | `war3-object` | ✅ | 对象数据（`.w3u` 等）：继承、字段类型、`TRIGSTR_` 解析，**并能写回** —— 真实语料上 **7 种对象文件 137/137 个成员逐字节一致**（`cargo run --example objects_roundtrip -p war3-object -- <地图目录>`） |
-| `war3-project` | ⚠️ 部分 | 源工程：`war3 map extract` / `war3 validate` / `war3 build`。`war3map.w3i`、**7 种对象文件与 `war3map.doo`** 已文本化（改单位字段、装饰物坐标或地图描述，游戏能看到）；其余成员是解码后二进制或原样块；**成员只有在文本形式被证明能逐字节还原之后才会文本化** |
+| `war3-project` | ⚠️ 部分 | 源工程：`war3 map extract` / `war3 validate` / `war3 build`。`war3map.w3i`、**7 种对象文件、`war3map.doo`、`war3mapUnits.doo` 与脚本**已文本化（改单位字段、装饰物坐标或地图描述，游戏能看到）；其余成员是解码后二进制或原样块；**成员只有在文本形式被证明能逐字节还原之后才会文本化** |
 | `war3-cli` | ✅ | `war3` 二进制 |
 | `.w3x` 往返 | ✅ 成员内容 | `war3 map rebuild` 逐成员回写归档；`extract` / `build` 让每个成员的内容逐字节往返 |
 | `war3-wtg` | ⬜ | 触发器数据（`.wtg` / `.wct`）：原型范围只做无损往返（ADR-0016） |
+| `war3-script` | ⬜ | 脚本前端（**只读**）：JASS / vJASS / Lua 的词法、语法、AST、符号分析。⚠️ 不执行、**不产出源码**、不做类型推导 —— 范围见 ADR-0024，边界见 ADR-0025 |
 
-**255 个测试全绿（`cargo test --workspace`），`cargo clippy --all-targets` 无警告。**
+**353 个测试全绿（`cargo test --workspace`），`cargo clippy --all-targets` 无警告。**
 除本工作区内的 crate 外没有任何依赖 —— 连 zlib 解压都是自己实现的，因此核心能编到
 WASM，也能用纯 Rust 工具链构建。
-
 ### 现在能读出什么
 
 | 目标 | 结果 |
@@ -50,6 +50,7 @@ WASM，也能用纯 Rust 工具链构建。
 | `.w3i` 重序列化 | **190 张图里 188 张 parse → 序列化逐字节一致**（`cargo run --example w3i_roundtrip -p war3-map -- <地图目录>`）；剩下的 2 张是 `war3map.w3i` 被 implode 压着 |
 | 放置数据重序列化 | `war3map.doo` **188/188 逐字节一致**（735,618 个装饰物）；`war3mapUnits.doo` **175/175**（26,826 个单位）：`cargo run --release --example doodads_roundtrip -p war3-map -- <地图目录>` |
 | 源工程往返 | 整条 `extract → build` 链跑遍本机所有地图，逐图打印成员去向与每一条拒绝理由：`cargo run --release --example project_regression -p war3-project -- <地图目录>` |
+| 脚本文本化 | `war3map.j` 只要可表示为 UTF-8 就落进 `[text]`（恒等搬运，不经解析）；190 张图实测文本化成员 **594 → 762**，逐成员零差异仍 **172 / 172**、失败 0。非 UTF-8 的脚本留在 `[binary]` 并报诊断 |
 | `war3 meta check D:\Warcraft3` | 7 张字段元数据表（单位 267 字段、技能 747 字段…）与 164 种触发类型 / 1389 个动作 |
 
 对 `war3map.w3i`、`war3map.w3e`、`war3map.j` 的导出与一份独立实现逐字节一致。
@@ -86,6 +87,10 @@ cargo build --release
 ./target/release/war3 map list "<地图>"
 ./target/release/war3 map file "<地图>" war3map.w3i > w3i.bin
 
+# ⚠️ 要把成员当「基准」用（往返比对、语法分析、拿出去编译）必须加 --out：
+#    stdout 是文本通道，实测 4,059,324 字节的脚本经它会变成 4,184,598（+3.09%）。
+./target/release/war3 map file "<地图>" WAR3MAP.J --out scripts/war3map.j
+
 # 用本工作区的写入器重写归档，并校验产物
 ./target/release/war3 map rebuild "<地图>" out.w3x
 
@@ -117,7 +122,8 @@ w3wright/
 │   ├── war3-meta/             # 对象字段元数据 + 触发定义
 │   ├── war3-object/           # 对象数据（.w3u 等）
 │   ├── war3-project/          # 源工程：extract / build
-│   └── war3-cli/              # 伞包，提供 war3 二进制
+│   ├── war3-cli/              # 伞包，提供 war3 二进制
+│   └── （war3-script/ 属 Phase 3，尚未建包）
 ├── examples/                  # 测试地图样本（二进制被 .gitignore 排除）
 └── README.md, README_CN.md
 ```
@@ -135,6 +141,11 @@ war3-cli  ← 伞包，唯一提供二进制的包
 ```
 
 `war3-cli` 依赖其他；其他包都不依赖 `war3-cli`。
+
+⚠️ **`war3-script`（Phase 3）另有一条硬约束：只允许依赖 `war3-core`。**
+它不依赖任何地图格式包，也不自行打开归档 —— 读游戏资产（`common.j` / `blizzard.j`）
+由调用方通过 `AssetSource` 注入。这条约束让它在将来拆分时只是移目录（ADR-0018），
+**在它被破坏之前不拆**。
 
 ---
 

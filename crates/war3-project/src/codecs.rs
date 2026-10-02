@@ -6,7 +6,7 @@
 
 use war3_core::{Error, FourCC, Result};
 
-use crate::{doodads_text, objects_text, units_text, w3i_text};
+use crate::{doodads_text, objects_text, script_text, units_text, w3i_text};
 
 /// How a member's bytes become text and back.
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +23,20 @@ pub struct Codec {
 }
 
 /// The codec for a member, if it has a text form yet.
+///
+/// The content matters for exactly one member: script source is its own text
+/// form, and whether it can be *stored* as text depends on the bytes being UTF-8
+/// (see [`script_text`]). Every other text form is a function of the name alone,
+/// so this falls back to the name-only lookup and stays usable by callers that
+/// only have a manifest to work from — `build` and `validate` read a text member
+/// back from disk and let a UTF-8 failure surface as its own error.
+#[must_use]
+pub fn codec_for_member(member: &str, content: &[u8]) -> Option<Codec> {
+    script_text::codec_for_script(member, content).or_else(|| codec_for(member))
+}
+
+/// The codec for a member name, if it has a text form that does not depend on the
+/// member's content.
 #[must_use]
 pub fn codec_for(member: &str) -> Option<Codec> {
     doodads_text::codec_for(member)
@@ -80,4 +94,27 @@ pub(crate) fn parse_hex(text: &str) -> Result<Vec<u8>> {
                 .map_err(|_| Error::msg(format!("{text:?} is not hex")))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_script_member_resolves_through_the_content_aware_lookup() {
+        let src = b"function main takes nothing returns nothing\nendfunction\n";
+        assert!(codec_for_member("war3map.j", src).is_some());
+        // A non-UTF-8 script deliberately has no text form, so extraction keeps it
+        // binary; the name-only lookup must not disagree by inventing one.
+        assert!(codec_for_member("war3map.j", b"\xFF").is_none());
+    }
+
+    #[test]
+    fn the_non_script_codecs_still_resolve() {
+        assert!(codec_for("war3map.w3i").is_some());
+        assert!(codec_for("war3map.doo").is_some());
+        assert!(codec_for("war3mapUnits.doo").is_some());
+        assert!(codec_for("war3map.w3u").is_some());
+        assert!(codec_for("war3map.w3e").is_none());
+    }
 }

@@ -82,6 +82,17 @@ pub fn sanitise(segment: &str) -> String {
     sanitise_reported(segment).0
 }
 
+/// The top-level directory a member lands in.
+///
+/// Exposed because a codec sometimes has to decide *what a member is* rather than
+/// where it goes — script source is identified by the fact that it lands in
+/// `scripts/`, so that the two spellings the game uses cannot be handled by two
+/// different rules. `'static` because it comes from the mapping itself, not from
+/// the member name, and returns `assets` for anything the mapping does not name.
+#[must_use]
+pub fn member_dir(member: &str) -> &'static str {
+    split_known(&member.to_ascii_lowercase()).map_or("assets", |(dir, _)| dir)
+}
 /// Whether a name is a Windows device name, which cannot be a file name.
 fn is_reserved(segment: &str) -> bool {
     let stem = segment
@@ -215,6 +226,19 @@ mod tests {
             raw_path_for("war3mapImported\\hero.blp"),
             "raw/war3mapimported/hero.blp.w3raw"
         );
+    }
+
+    #[test]
+    fn the_directory_is_what_a_codec_can_recognise_a_member_by() {
+        // Script source is found by directory, not by a list of names, so both
+        // spellings the game uses resolve the same way.
+        for member in ["war3map.j", "WAR3MAP.J", "scripts\\war3map.j", "war3map.lua"] {
+            assert_eq!(member_dir(member), "scripts", "{member}");
+        }
+        assert_eq!(member_dir("war3map.w3i"), "info");
+        assert_eq!(member_dir("war3map.w3e"), "terrain");
+        assert_eq!(member_dir("war3mapUnits.doo"), "units");
+        assert_eq!(member_dir("war3mapMap.blp"), "assets");
     }
 
     #[test]

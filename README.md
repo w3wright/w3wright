@@ -1,4 +1,4 @@
-# w3wright
+﻿# w3wright
 
 **English** | [中文](README_CN.md)
 A Warcraft III map development platform, written in Rust.
@@ -31,12 +31,13 @@ missing is the source-project direction.
 | `war3-terrain` | done | `.w3e` in both the v11 and v12 layouts, plus a SYLK reader |
 | `war3-meta` | done | object field metadata read from the game's `*MetaData.slk`, `TriggerData.txt` trigger definitions, the editor-data type registry |
 | `war3-object` | done | object data (`.w3u` and friends): inheritance, field typing, `TRIGSTR_` resolution, and writing back — **137 of 137 members over 7 kinds byte-identical** on a real corpus (`cargo run --example objects_roundtrip -p war3-object -- <maps>`) |
-| `war3-project` | partial | source project: `war3 map extract` / `war3 validate` / `war3 build`. `war3map.w3i`, **the seven object files and `war3map.doo`** are text (edit a unit's field, a doodad's position or the map description and the game sees it); every other member is decoded binary or a verbatim block, and a member is only textified once its text form is proved to reproduce it byte for byte |
+| `war3-project` | partial | source project: `war3 map extract` / `war3 validate` / `war3 build`. `war3map.w3i`, **the seven object files, `war3map.doo`, `war3mapUnits.doo` and the script** are text (edit a unit's field, a doodad's position or the map description and the game sees it); every other member is decoded binary or a verbatim block, and a member is only textified once its text form is proved to reproduce it byte for byte |
 | `war3-cli` | done | the `war3` binary |
 | `.w3x` round trip | done for member content | `war3 map rebuild` rewrites an archive member by member; `extract` / `build` round-trip every member's content byte for byte |
 | `war3-wtg` | not started | trigger data (`.wtg` / `.wct`); prototype scope is a lossless round trip only |
+| `war3-script` | not started | script front end (**read-only**): JASS / vJASS / Lua lexing, parsing, AST, symbol analysis. It does not execute, **does not emit source**, and does not infer types — scope in ADR-0024, boundaries in ADR-0025 |
 
-**255 tests pass (`cargo test --workspace`) and `cargo clippy --all-targets` is clean.** The dependency
+**353 tests pass (`cargo test --workspace`) and `cargo clippy --all-targets` is clean.** The dependency
 set is empty apart from the crates in this workspace, including the zlib
 decompressor, so the core builds for WASM and with a plain Rust toolchain.
 
@@ -52,6 +53,7 @@ decompressor, so the core builds for WASM and with a plain Rust toolchain.
 | `.w3i` re-serialisation | **188 of 190 maps parse → serialise byte for byte** (`cargo run --example w3i_roundtrip -p war3-map -- <maps>`); the two that differ have an imploded `war3map.w3i` |
 | placement re-serialisation | `war3map.doo` **188 of 188 maps byte-identical** (735,618 doodads) and `war3mapUnits.doo` **175 of 175** (26,826 units): `cargo run --release --example doodads_roundtrip -p war3-map -- <maps>` |
 | source-project round trip | the whole `extract → build` path over every map on this machine, with the member counts and every refusal printed: `cargo run --release --example project_regression -p war3-project -- <maps>` |
+| script textification | `war3map.j` lands in `[text]` whenever it is representable as UTF-8 (moved verbatim, never parsed); over 190 maps textified members went **594 → 762** while member content stayed byte-identical on **172 of 172** maps, 0 failures. A script that is not UTF-8 stays in `[binary]` and is diagnosed |
 | `war3 meta check D:\Warcraft3` | 7 field-metadata tables (267 unit fields, 747 ability fields, …) and 164 trigger types / 1389 actions |
 
 Extraction is byte-identical to an independent implementation of the format for
@@ -94,6 +96,11 @@ cargo build --release
 ./target/release/war3 map list "<map>"
 ./target/release/war3 map file "<map>" war3map.w3i > w3i.bin
 
+# ⚠️ Use --out whenever the bytes are a *baseline* (round-trip comparison, parsing,
+#    compiling outside this workspace). stdout is a text channel: measured on a
+#    4,059,324-byte script it produced 4,184,598 bytes instead (+3.09%).
+./target/release/war3 map file "<map>" WAR3MAP.J --out scripts/war3map.j
+
 # Rewrite the archive with this workspace's writer, and verify the result.
 ./target/release/war3 map rebuild "<map>" out.w3x
 
@@ -127,7 +134,8 @@ w3wright/
 │   ├── war3-meta/             # object field metadata and trigger definitions
 │   ├── war3-object/           # object data (.w3u and friends)
 │   ├── war3-project/          # source project: extract / build
-│   └── war3-cli/              # umbrella crate providing the war3 binary
+│   ├── war3-cli/              # umbrella crate providing the war3 binary
+│   └── (war3-script/ arrives in Phase 3)
 ├── examples/                  # test map samples (binaries are gitignored)
 └── README.md, README_CN.md
 ```
@@ -145,6 +153,12 @@ war3-cli  <- umbrella crate, the only one producing a binary
 ```
 
 `war3-cli` depends on the others; none of the others depends on `war3-cli`.
+
+⚠️ **`war3-script` (Phase 3) has an extra hard rule: it may depend on `war3-core` and
+nothing else.** It does not depend on any map-format crate and never opens an archive
+itself — reading game assets (`common.j` / `blizzard.j`) is injected by the caller as an
+`AssetSource`. That rule is what keeps a future split down to moving a directory
+(ADR-0018); **do not split it before the rule is broken.**
 
 ---
 
