@@ -30,15 +30,20 @@
 
 use std::path::Path;
 
-use crate::archive::{normalise_name, BlockFlags, MpqError, MpqResult, RawMember, MPQ_MAGIC};
+use crate::archive::{
+    normalise_name, Archive, ArchiveHeader, BlockFlags, MpqError, MpqResult, RawMember, MPQ_MAGIC,
+};
 use crate::crypto::{
-    crypt_table, encrypt, hash_string, HashType, BLOCK_TABLE_KEY_NAME, HASH_TABLE_KEY_NAME,
+    bytes_to_u32_le, crypt_table, decrypt, encrypt, hash_string, HashType, BLOCK_TABLE_KEY_NAME,
+    HASH_TABLE_KEY_NAME,
 };
 
 /// Size of the header written here. The format's original version is 32 bytes.
 const HEADER_SIZE: u32 = 32;
 /// Size of one hash or block table entry.
 const ENTRY_SIZE: u32 = 16;
+/// Size of one block table entry, which is the same as a hash entry.
+const BLOCK_ENTRY_SIZE: usize = 16;
 /// Sector size shift written into the header: `512 << 3 == 4096`.
 const SECTOR_SIZE_SHIFT: u16 = 3;
 /// Smallest hash table worth writing, and a power of two.
@@ -51,6 +56,186 @@ const FLAG_EXISTS: u32 = 0x8000_0000;
 const FLAG_SINGLE_UNIT: u32 = 0x0100_0000;
 /// Value in every field of an unused hash slot.
 const HASH_SLOT_UNUSED: u32 = 0xFFFF_FFFF;
+
+/// Edits members of an existing archive **in place**, preserving every byte it does
+/// not touch.
+///
+/// # Why this exists next to [`ArchiveBuilder`]
+///
+/// `ArchiveBuilder` builds an archive from nothing: it chooses the hash table size,
+/// the member order and the encoding. Measured on `(4)LostTemple.w3m`, a rebuild
+/// keeps every member's content byte for byte (16 of 16) but changes the archive
+/// itself from 245,236 bytes to 244,201, diverging at offset 520 — the hash table.
+///
+/// For an editor that is the wrong primitive. Changing one string must not rewrite
+/// the user's whole map, because the result is a different file even when every
+/// member matches, and "the file I gave you, with one field changed" is what a user
+/// is entitled to.
+///
+/// # How this can preserve the rest
+///
+/// Three properties of the format, all of which have to hold:
+///
+/// 1. Table positions in the header **and** member positions in the block table are
+///    relative to the header, so no table ever has to move.
+/// 2. Member data lies between the header and the hash table; the tables come after
+///    it. A replaced member's new block is therefore appended at the end of the file
+///    and nothing else moves.
+/// 3. A hash slot is chosen by the member's *name*. Replacing content under the same
+///    name leaves the hash table byte for byte as it was.
+///
+/// So the minimum change is one block table entry plus the appended bytes. See
+/// `docs/decisions/ADR-0028` for the decision and its cost.
+///
+/// # Cost
+///
+/// The replaced member's **original block stays where it is**, unreachable. A save
+/// grows the file by roughly the new content's size. That is deliberate: reclaiming
+/// the dead bytes would mean re-laying the archive out, which is the rebuild this
+/// type exists to avoid. Under this design the claim "nothing else changed" is
+/// checkable; under a rebuild it is not.
+#[derive(Debug)]
+pub struct ArchivePatcher {
+    buffer: Vec<u8>,
+    header: ArchiveHeader,
+    /// Block table entries modified, so callers can report how many.
+    dirty: Vec<u32>,
+}
+
+impl ArchivePatcher {
+    /// Opens an archive's bytes for patching.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Archive::open`] reports, so a file this cannot patch is rejected
+    /// by the same rules that decide whether it can be read at all.
+    pub fn new(bytes: Vec<u8>) -> MpqResult<Self> {
+        let archive = Archive::from_bytes(bytes.clone())?;
+        Ok(Self {
+            buffer: bytes,
+            header: *archive.header(),
+            dirty: Vec::new(),
+        })
+    }
+
+    /// Replaces one member's content with `data`, stored plainly.
+    ///
+    /// # Errors
+    ///
+    /// - [`MpqError::NotFound`] when no member has that name.
+    /// - [`MpqError::MemberNotWritable`] when the member is encrypted or derives its
+    ///   key from its block offset.
+    ///
+    /// # Why encryption is refused instead of handled
+    ///
+    /// Writing the new block plainly would turn an encrypted member into a readable
+    /// one — a change to the map's protection that the user did not ask for. Writing
+    /// it encrypted means reusing the member's file key, whose derivation depends in
+    /// turn on `BLOCK_OFFSET_ADJUSTED_KEY`. Both are real work with real decisions in
+    /// them, so this refuses and says why. Measured over the 190-map corpus, that
+    /// affects 4 `war3map.w3i` members and 0 offset-adjusted ones.
+    ///
+    /// # Errors on size
+    ///
+    /// Content larger than the format's 32-bit size field is refused rather than
+    /// truncated.
+    pub fn replace(&mut self, name: &str, data: Vec<u8>) -> MpqResult<()> {
+        // Reopened per call rather than cached: this keeps the patcher honest about
+        // the buffer it is actually editing, at the cost of re-reading the tables.
+        // Callers replace one or two members, so the cost is not worth a cache that
+        // could go stale.
+        let archive = Archive::from_bytes(self.buffer.clone())?;
+        let block_index = archive
+            .block_index_for_name(name)
+            .ok_or_else(|| MpqError::NotFound(name.to_string()))?;
+        let entry = *archive
+            .block_entry(block_index as usize)
+            .ok_or_else(|| MpqError::NotFound(name.to_string()))?;
+
+        if entry.flags.has(BlockFlags::ENCRYPTED) {
+            return Err(MpqError::MemberNotWritable {
+                name: name.to_string(),
+                reason: "it is encrypted, and rewriting it plainly would make a protected \
+                         member readable; supporting this needs its file key, not a guess",
+            });
+        }
+        if entry.flags.has(BlockFlags::BLOCK_OFFSET_ADJUSTED_KEY) {
+            return Err(MpqError::MemberNotWritable {
+                name: name.to_string(),
+                reason: "its key is derived from its block offset, so relocating the block \
+                         would invalidate the ciphertext",
+            });
+        }
+
+        let size = u32::try_from(data.len()).map_err(|_| MpqError::MemberNotWritable {
+            name: name.to_string(),
+            reason: "the new content is larger than the format's 32-bit size field",
+        })?;
+
+        // Appended at the very end, which is past every table for any archive this
+        // reader accepts.
+        let new_at = self.buffer.len() as u32;
+        self.buffer.extend_from_slice(&data);
+
+        // ⚠️ The **whole** block table is decrypted, not the one entry.
+        //
+        // MPQ table encryption is a stream: each 4-byte word's keystream depends on
+        // the running value of the previous word. Decrypting a single 16-byte entry
+        // in isolation therefore gives the right answer only for the first entry of
+        // the table — every later one comes back as noise, and writing that noise
+        // back corrupts an unrelated member. That was a real bug here: patching
+        // `war3map.w3i` left `war3map.wts` with a file position of 133,171,052.
+        let table = crypt_table();
+        let key = hash_string(&table, HashType::FileKey, BLOCK_TABLE_KEY_NAME);
+        let block_pos = self.header.block_table_offset() as usize;
+        let table_len = self.header.block_table_size as usize * BLOCK_ENTRY_SIZE;
+        let table_bytes = self
+            .buffer
+            .get_mut(block_pos..block_pos + table_len)
+            .ok_or(MpqError::Eof)?;
+        let mut words = bytes_to_u32_le(table_bytes);
+        decrypt(&table, &mut words, key);
+
+        let at = block_index as usize * 4;
+        // The format has no block for an empty file: both sizes are zero and the
+        // position is ignored. The `exists` flag stays set, which is what makes a
+        // reader list the member without trying to read it.
+        if size == 0 {
+            words[at] = 0;
+            words[at + 1] = 0;
+            words[at + 2] = 0;
+        } else {
+            words[at] = new_at - self.header.file_offset as u32;
+            words[at + 1] = size;
+            words[at + 2] = size;
+        }
+        // Plain and single-unit. This clears the original block's compression bits,
+        // which is correct: the block those described is no longer the one this
+        // entry points at.
+        words[at + 3] = FLAG_EXISTS | FLAG_SINGLE_UNIT;
+
+        encrypt(&table, &mut words, key);
+        for (i, word) in words.iter().enumerate() {
+            table_bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        if !self.dirty.contains(&block_index) {
+            self.dirty.push(block_index);
+        }
+        Ok(())
+    }
+
+    /// The archive's bytes after the replacements.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.buffer.clone()
+    }
+
+    /// How many members were replaced.
+    #[must_use]
+    pub fn patched_count(&self) -> usize {
+        self.dirty.len()
+    }
+}
 
 /// Builds an MPQ archive in memory.
 #[derive(Debug, Default)]
@@ -391,5 +576,156 @@ mod tests {
             let data = archive.read_file(name).unwrap();
             assert!(data == b"first" || data == b"second");
         }
+    }
+}
+
+#[cfg(test)]
+mod patcher_tests {
+    use super::*;
+
+    /// Builds a small archive to patch, with two members so "the other one is
+    /// untouched" is checkable.
+    fn two_member_archive() -> Vec<u8> {
+        let mut builder = ArchiveBuilder::new();
+        builder.add_stored("war3map.w3i", b"original-map-info".to_vec());
+        builder.add_stored("war3map.wts", b"original-strings".to_vec());
+        builder.to_bytes().expect("a buildable archive")
+    }
+
+    /// The core claim of ADR-0028, stated as an assertion.
+    ///
+    /// Patching one member must leave the archive identical except for the block
+    /// table entry that member uses and the bytes appended for its new block. This
+    /// is the property a rebuild cannot provide, and the one an editor's safety rests
+    /// on: a user's file comes back as their file.
+    #[test]
+    fn patching_changes_only_the_entry_and_the_appended_block() {
+        let original = two_member_archive();
+        let mut patcher = ArchivePatcher::new(original.clone()).expect("a readable archive");
+
+        let replacement = b"edited-map-info".to_vec();
+        patcher
+            .replace("war3map.w3i", replacement.clone())
+            .expect("an unencrypted member is patchable");
+        let patched = patcher.to_bytes();
+
+        assert_eq!(patcher.patched_count(), 1);
+        assert_eq!(
+            patched.len(),
+            original.len() + replacement.len(),
+            "exactly the new block is appended and nothing is removed"
+        );
+
+        // Everything up to the block table must be untouched.
+        let archive = Archive::from_bytes(original.clone()).expect("the original");
+        let block_table_at = archive.header().block_table_offset() as usize;
+        assert_eq!(
+            &patched[..block_table_at],
+            &original[..block_table_at],
+            "the prefix, header, member data and hash table must all be identical"
+        );
+
+        // Past the block table: only the appended block is new.
+        let block_table_end = block_table_at + archive.header().block_table_size as usize * 16;
+        assert_eq!(
+            &patched[block_table_end..],
+            &replacement[..],
+            "the appended bytes are the replacement, verbatim"
+        );
+    }
+
+    /// The other member must read back exactly as before.
+    #[test]
+    fn an_untouched_member_reads_back_identically() {
+        let original = two_member_archive();
+        let mut patcher = ArchivePatcher::new(original.clone()).unwrap();
+        patcher.replace("war3map.w3i", b"edited".to_vec()).unwrap();
+
+        let patched = Archive::from_bytes(patcher.to_bytes()).expect("the patched archive reads");
+        assert_eq!(patched.read_file("war3map.wts").unwrap(), b"original-strings");
+        assert_eq!(patched.read_file("war3map.w3i").unwrap(), b"edited");
+    }
+
+    /// The replacement must be readable under its own name, with its size reported.
+    #[test]
+    fn the_replaced_member_reads_back_as_the_new_content() {
+        let original = two_member_archive();
+        let mut patcher = ArchivePatcher::new(original).unwrap();
+        let replacement = vec![0xABu8; 1234];
+        patcher.replace("war3map.w3i", replacement.clone()).unwrap();
+
+        let patched = Archive::from_bytes(patcher.to_bytes()).unwrap();
+        assert_eq!(patched.read_file("war3map.w3i").unwrap(), replacement);
+        // And the member list still finds both.
+        let mut names = patched.file_names();
+        names.sort_unstable();
+        // `file_names` reports the enumeration's uppercase form by design.
+        assert_eq!(names, vec!["WAR3MAP.W3I", "WAR3MAP.WTS"]);
+    }
+
+    /// An unknown name is an error, not a silent no-op.
+    #[test]
+    fn replacing_a_missing_member_is_an_error() {
+        let mut patcher = ArchivePatcher::new(two_member_archive()).unwrap();
+        let err = patcher.replace("war3map.nope", b"x".to_vec()).unwrap_err();
+        assert!(matches!(err, MpqError::NotFound(_)), "got {err:?}");
+        assert_eq!(patcher.patched_count(), 0, "nothing was modified");
+    }
+
+    /// Empty content is representable, and the format expresses it as a zero block.
+    #[test]
+    fn replacing_with_nothing_produces_a_listable_empty_member() {
+        let mut patcher = ArchivePatcher::new(two_member_archive()).unwrap();
+        patcher.replace("war3map.w3i", Vec::new()).unwrap();
+        let patched = Archive::from_bytes(patcher.to_bytes()).unwrap();
+        assert!(patched
+            .file_names()
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("war3map.w3i")));
+        assert!(patched.read_file("war3map.w3i").unwrap().is_empty());
+    }
+
+    /// An encrypted member is refused, and the refusal is the documented one.
+    ///
+    /// The alternative — writing it plainly — would make a protected member
+    /// readable, which is a change nobody asked for. This pins that the refusal
+    /// happens rather than that some other error does.
+    #[test]
+    fn an_encrypted_member_is_refused_rather_than_made_readable() {
+        let mut builder = ArchiveBuilder::new();
+        builder.add_raw(RawMember {
+            name: "secret.w3i".to_string(),
+            block: vec![0u8; 8],
+            uncompressed_size: 8,
+            flags: BlockFlags(0x8000_0000 | 0x0001_0000), // exists | encrypted
+            locale: 0,
+            platform: 0,
+        })
+        .unwrap();
+        let bytes = builder.to_bytes().unwrap();
+
+        let mut patcher = ArchivePatcher::new(bytes).unwrap();
+        let err = patcher.replace("secret.w3i", b"plain".to_vec()).unwrap_err();
+        match err {
+            MpqError::MemberNotWritable { reason, .. } => {
+                assert!(reason.contains("encrypted"), "reason was: {reason}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(patcher.patched_count(), 0);
+    }
+
+    /// Two replacements in one pass both land.
+    #[test]
+    fn two_members_can_be_replaced_in_one_pass() {
+        let original = two_member_archive();
+        let mut patcher = ArchivePatcher::new(original).unwrap();
+        patcher.replace("war3map.w3i", b"first".to_vec()).unwrap();
+        patcher.replace("war3map.wts", b"second".to_vec()).unwrap();
+        assert_eq!(patcher.patched_count(), 2);
+
+        let patched = Archive::from_bytes(patcher.to_bytes()).unwrap();
+        assert_eq!(patched.read_file("war3map.w3i").unwrap(), b"first");
+        assert_eq!(patched.read_file("war3map.wts").unwrap(), b"second");
     }
 }

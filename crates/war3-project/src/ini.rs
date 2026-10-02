@@ -50,9 +50,36 @@ impl Section {
         }
     }
 
-    /// Appends an entry.
+    /// Sets an entry, **replacing** any existing one with the same key.
+    ///
+    /// # Why replace rather than append
+    ///
+    /// This used to append unconditionally, with a comment saying so. For the writers
+    /// that build a fresh section it made no difference, because they set each key
+    /// once. It made a critical difference for anyone **editing** a parsed document:
+    /// setting a key that already existed produced a section holding that key twice.
+    ///
+    /// That combination is a trap, because the two halves of a round trip disagreed
+    /// about what it meant:
+    ///
+    /// - [`Self::get`] returns the **first** entry, so the edit looked ignored.
+    /// - [`Document::render`] writes **both**, and [`Document::parse`] rejects a
+    ///   duplicate key as an error.
+    ///
+    /// So "open a file, change a field, save it" produced text this crate then
+    /// refuses to read back. The edit path was broken by construction, and the
+    /// failure surfaced a step later than its cause.
+    ///
+    /// Replacing in place is what a setter is normally taken to mean, and it keeps the
+    /// key's original position, so a re-rendered document differs only on the line
+    /// that actually changed.
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) -> &mut Self {
-        self.entries.push((key.into(), value.into()));
+        let key = key.into();
+        let value = value.into();
+        match self.entries.iter_mut().find(|(k, _)| *k == key) {
+            Some(entry) => entry.1 = value,
+            None => self.entries.push((key, value)),
+        }
         self
     }
 
@@ -470,5 +497,54 @@ name = \"TRIGSTR_002\"
             .unwrap_err()
             .to_string();
         assert!(err.contains("[player]") && err.contains("name"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod set_semantics_tests {
+    use super::*;
+
+    /// The bug that broke the edit path: `set` on an existing key must replace it.
+    ///
+    /// Pinned because the failure mode is indirect. An appended duplicate is not
+    /// visible through `get` (which finds the old value, so the edit looks ignored),
+    /// and it only becomes an error when the rendered text is parsed again.
+    #[test]
+    fn setting_an_existing_key_replaces_it_in_place() {
+        let mut section = Section::new("info");
+        section.set("name", "before");
+        section.set("other", "kept");
+        section.set("name", "after");
+
+        assert_eq!(section.get("name"), Some("after"), "the edit must be visible");
+        assert_eq!(section.entries.len(), 2, "no duplicate was added");
+        assert_eq!(
+            section.entries[0].0, "name",
+            "the key keeps its original position, so a diff stays local"
+        );
+    }
+
+    /// And the whole round trip has to close: render, parse, same values.
+    ///
+    /// This is the assertion that would have caught the original bug at the level it
+    /// matters — "edit a field and read the result back".
+    #[test]
+    fn an_edited_document_round_trips() {
+        let mut doc = Document::new();
+        {
+            let s = doc.push("info");
+            s.set("version", "25");
+            s.set("name", "original");
+        }
+        doc.sections[0].set("name", "edited");
+
+        let text = doc.render();
+        let reparsed = Document::parse(&text).expect("the rendered text must be readable");
+        assert_eq!(
+            reparsed.sections[0].get("name"),
+            Some("edited"),
+            "the edit survives the round trip"
+        );
+        assert_eq!(text.lines().filter(|l| l.starts_with("name")).count(), 1);
     }
 }

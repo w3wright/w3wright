@@ -26,6 +26,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod codecs;
+pub mod disposition;
 pub mod config;
 pub mod doodads_text;
 pub mod ini;
@@ -38,6 +39,7 @@ pub mod units_text;
 pub mod w3i_text;
 
 pub use config::{Config, Members};
+pub use disposition::Disposition;
 pub use project::{
     build, extract, validate, BuildReport, ExtractReport, ValidateReport, PREFIX_PATH,
 };

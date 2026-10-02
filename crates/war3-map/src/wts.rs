@@ -81,7 +81,9 @@ impl StringTable {
         // Two states: waiting for `STRING n`, and collecting a value block.
         let mut lines = text.lines();
         while let Some(line) = lines.next() {
-            let trimmed = line.trim();
+            // A BOM before the label must not hide it — see [`trim_bom`]. Without
+            // this the first entry of a BOM-prefixed file is silently dropped.
+            let trimmed = trim_bom(line).trim();
             let Some(rest) = trimmed.strip_prefix("STRING") else {
                 continue;
             };
@@ -96,20 +98,24 @@ impl StringTable {
             // whose text is still the author's.
             let mut saw_brace = false;
             let mut collecting = false;
+            // Every comparison in here has to see through a BOM as well: a mark
+            // before the brace would make `== "{"` fail and the brace line would be
+            // collected as part of the value.
+            let clean = |line: &str| trim_bom(line).trim().to_string();
             for inner in lines.by_ref() {
-                if inner.trim() == "}" {
+                if clean(inner) == "}" {
                     closed = true;
                     break;
                 }
                 if !collecting {
-                    if inner.trim() == "{" {
+                    if clean(inner) == "{" {
                         saw_brace = true;
                         collecting = true;
                         continue;
                     }
                     // Every line before the brace is a label — the generator's
                     // `// 技能: …` annotation — and never part of the value.
-                    if inner.trim().is_empty() || inner.trim().starts_with("//") {
+                    if clean(inner).is_empty() || clean(inner).starts_with("//") {
                         continue;
                     }
                     collecting = true;
@@ -234,23 +240,81 @@ impl fmt::Display for StringTable {
 ///
 /// Returns `None` when the value is not a reference. Matching is
 /// case-insensitive and does not require three digits.
+///
+/// # Why this does not slice by byte
+///
+/// The obvious form — `trimmed.split_at(7)` and compare — **panics on any map whose
+/// value starts with a non-ASCII character**, because `split_at` counts bytes and 7
+/// can land inside a multi-byte character. It aborted the whole command on
+/// `澄海3C-AI版.w3x`, whose first bytes are the name `力...`: `end byte index 7 is
+/// not a char boundary`.
+///
+/// `str::get(..7)` is the safe equivalent: it yields `None` instead of panicking when
+/// the range is not on a boundary, and the ASCII check that follows is what the
+/// comparison wanted anyway. A non-ASCII value is by definition not `TRIGSTR_`, so
+/// rejecting it there is correct rather than merely safe.
 #[must_use]
 pub fn parse_trigstr(value: &str) -> Option<u32> {
     let trimmed = value.trim();
-    // Seven characters of prefix plus one underscore.
-    if trimmed.len() < 8 {
+    // Seven characters of prefix, then an underscore.
+    let prefix: &str = trimmed.get(..7)?;
+    if !prefix.eq_ignore_ascii_case("TRIGSTR") {
         return None;
     }
-    let (prefix, rest) = trimmed.split_at(7);
-    if !prefix.eq_ignore_ascii_case("TRIGSTR") || !rest.starts_with('_') {
-        return None;
+    let rest = trimmed.get(7..)?.strip_prefix('_')?;
+    rest.trim_start().parse::<u32>().ok()
+}
+
+/// A line with any leading byte-order marks removed.
+///
+/// # Why this is not just one `strip_prefix` at the top
+///
+/// `.wts` files are written by the World Editor and by third-party generators, and a
+/// BOM can appear before a `STRING` label anywhere in the file — not only at the
+/// start. Any BOM left in place makes the label unparseable, and the entry then
+/// **silently disappears** from the table.
+///
+/// That is not hypothetical: the map `侏罗纪公园1.5.w3x` begins with `EF BB BF`
+/// followed by `STRING 1`, which is the entry holding the map's own name. The table
+/// parsed 2224 of its 2225 entries and the one it lost was the name, so the map
+/// reported `TRIGSTR_001` plus a "the .wts does not have this key" warning — a wrong
+/// answer about a file that was fine.
+///
+/// The strip repeats so that several marks in a row are handled, which is what a
+/// generator concatenating BOM-prefixed fragments produces.
+fn trim_bom(line: &str) -> &str {
+    let mut rest = line;
+    while let Some(stripped) = rest.strip_prefix('\u{FEFF}') {
+        rest = stripped;
     }
-    rest[1..].trim_start().parse::<u32>().ok()
+    rest
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value that starts with a multi-byte character must not panic.
+    ///
+    /// `parse_trigstr` used to compare `trimmed.split_at(7)`, which counts bytes —
+    /// so a value whose 7th byte fell inside a character panicked and aborted the
+    /// command. This is the exact byte sequence that did it:
+    /// `war3 map info 澄海3C-AI版.w3x` died with "end byte index 7 is not a char
+    /// boundary; it is inside the character ...".
+    #[test]
+    fn a_non_ascii_value_is_rejected_without_panicking() {
+        // The same escapes the fixtures above use, so the source stays ASCII.
+        let chinese = "\u{529b}\u{91cf}\u{8f6c}\u{6362}"; // 4 characters, 12 bytes
+        assert!(parse_trigstr(chinese).is_none());
+        // The dangerous case: a 3-byte character straddling byte 7.
+        let straddles = "\u{4e2d}\u{56fd}\u{529b}";
+        assert!(parse_trigstr(straddles).is_none());
+        // And the ordinary cases still work, including around the boundary.
+        assert_eq!(parse_trigstr("TRIGSTR_010"), Some(10));
+        assert_eq!(parse_trigstr("  trigstr_7  "), Some(7));
+        assert!(parse_trigstr("TRIGSTR").is_none());
+        assert!(parse_trigstr("STRIGSTR_1").is_none());
+    }
 
     #[test]
     fn parses_a_simple_table() {
@@ -260,6 +324,33 @@ mod tests {
         assert_eq!(table.get(0), Some("Hello"));
         assert_eq!(table.get(1), Some("World"));
         assert!(table.diagnostics().is_empty());
+    }
+
+    /// A byte-order mark before a label must not hide that entry.
+    ///
+    /// This is the bug the map `侏罗纪公园1.5.w3x` exposed: the file begins with
+    /// `EF BB BF` then `STRING 1`, and entry 1 is where the map's own name lives.
+    /// The table parsed every entry except that one, so the map resolved to
+    /// `TRIGSTR_001` and reported a missing key — for a table that had it.
+    #[test]
+    fn a_bom_before_a_label_does_not_hide_the_entry() {
+        let raw = b"\xEF\xBB\xBFSTRING 1\r\n{\r\n\xE5\x90\x8D\xE5\xAD\x97\r\n}\r\n\r\nSTRING 2\r\n{\r\nsecond\r\n}\r\n";
+        let table = StringTable::parse(raw);
+        assert_eq!(table.len(), 2, "both entries must be seen");
+        assert_eq!(table.get(1), Some("\u{540d}\u{5b57}"), "the BOM-prefixed first entry");
+        assert_eq!(table.get(2), Some("second"));
+        assert!(
+            !table.diagnostics().has_problems(),
+            "a BOM is normal in these files, not something to warn about"
+        );
+    }
+
+    /// A mark before the brace must not make the brace part of the value.
+    #[test]
+    fn a_bom_before_a_brace_is_still_a_brace() {
+        let raw = b"STRING 3\r\n\xEF\xBB\xBF{\r\nvalue\r\n}\r\n";
+        let table = StringTable::parse(raw);
+        assert_eq!(table.get(3), Some("value"));
     }
 
     #[test]

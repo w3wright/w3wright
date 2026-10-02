@@ -127,7 +127,10 @@ pub fn extract(map: &Path, dir: &Path, drop_unnamed: bool) -> Result<ExtractRepo
                     format!("{name}: stored as {rel}, which is not the member name"),
                 ));
             }
-            match text_form(name, &content, &mut diagnostics)? {
+            // The disposition comes from `disposition`, which is also what an
+            // interface asks when it shows a member's fate. One implementation, so a
+            // screen cannot claim "textified" for a member this writes as binary.
+            match crate::disposition::text_form(name, &content, &mut diagnostics)? {
                 Some(text) => {
                     write_project_file(dir, &rel, text.as_bytes())?;
                     config.text.insert(name.to_string(), rel);
@@ -172,51 +175,6 @@ pub fn extract(map: &Path, dir: &Path, drop_unnamed: bool) -> Result<ExtractRepo
     })
 }
 
-/// The member's text form, but only when it is *proved* to reproduce the file.
-///
-/// This is where "textify or keep verbatim" stops being a promise and becomes a
-/// check: the text is parsed back and compared with the original bytes, and a
-/// member that does not come back identical is stored as binary instead. A
-/// serialiser that is right about 188 maps out of 190 is useful; one that is
-/// quietly wrong about 2 is not.
-fn text_form(name: &str, content: &[u8], diagnostics: &mut Diagnostics) -> Result<Option<String>> {
-    let Some(codec) = codecs::codec_for_member(name, content) else {
-        return Ok(None);
-    };
-    let text = match (codec.to_text)(name, content) {
-        Ok(text) => text,
-        Err(e) => {
-            diagnostics.push(Diagnostic::warn(
-                DiagnosticCode::ProjectMemberKeptBinary,
-                format!("{name}: kept as binary, its text form could not be produced: {e}"),
-            ));
-            return Ok(None);
-        }
-    };
-    match (codec.from_text)(name, &text) {
-        Ok(back) if back == content => Ok(Some(text)),
-        Ok(back) => {
-            let at = back.iter().zip(content).position(|(a, b)| a != b);
-            diagnostics.push(Diagnostic::warn(
-                DiagnosticCode::ProjectMemberKeptBinary,
-                format!(
-                    "{name}: kept as binary, the text form gives {} bytes against {} and first \
-                     differs at {at:?}",
-                    back.len(),
-                    content.len()
-                ),
-            ));
-            Ok(None)
-        }
-        Err(e) => {
-            diagnostics.push(Diagnostic::warn(
-                DiagnosticCode::ProjectMemberKeptBinary,
-                format!("{name}: kept as binary, the text form does not read back: {e}"),
-            ));
-            Ok(None)
-        }
-    }
-}
 
 /// The bytes a `[text]` member produces, read back from the file on disk.
 ///

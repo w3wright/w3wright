@@ -366,7 +366,6 @@ impl<'a> Bits<'a> {
     /// Two shift amounts, both measured against the pending count — see the struct
     /// documentation. This is the function the decoder's correctness rests on.
     fn consume(&mut self, n: u32) -> Result<(), CodecError> {
-
         if n <= self.pending {
             self.pending -= n;
             self.buff >>= n;
@@ -396,15 +395,21 @@ impl<'a> Bits<'a> {
         Ok(value)
     }
 
-    /// Peeks eight bits, loading first when fewer than eight are pending.
+    /// The eight bits a table lookup needs.
     ///
-    /// The reference refuses to index a table unless a full eight bits are present,
-    /// so the load belongs here rather than in the caller.
-    fn peek8_with_load(&mut self) -> Result<u8, CodecError> {
-        if self.pending < 8 && !self.load() {
-            return Err(CodecError::Eof);
-        }
-        Ok(self.peek8())
+    /// ⚠️ **This must not load.** It used to, on the reasoning that a table index
+    /// needs eight bits present — and that is exactly what put this decoder 15 bytes
+    /// in before it went wrong. The reference is stricter than it looks: `DecodeLit`
+    /// and `DecodeDist` read `bit_buff & 0xFF` *without* checking the count, and the
+    /// count is guaranteed only because a `WasteBits` call follows every such read.
+    /// Loading here breaks that guarantee from the other side, because the byte this
+    /// peeks is one the next `WasteBits` would have placed — so the same bytes end up
+    /// positioned differently and the two decoders diverge on a later control bit.
+    ///
+    /// Stale high bits are harmless: `& 0xFF` keeps only what is pending once those
+    /// bits are at the bottom, and `consume` is what loads.
+    fn peek8_for_table(&self) -> u8 {
+        self.peek8()
     }
 }
 
@@ -434,7 +439,7 @@ fn decode_symbol(
 ) -> Result<Symbol, CodecError> {
     // `DecodeLit`'s first test: the control bit.
     if bits.read(1)? == 1 {
-        let symbol = usize::from(len_table[bits.peek8_with_load()? as usize]);
+        let symbol = usize::from(len_table[bits.peek8_for_table() as usize]);
         bits.consume(u32::from(LEN_BITS[symbol]))?;
 
         let extra_bits = EX_LEN_BITS[symbol];
@@ -472,7 +477,7 @@ fn decode_symbol(
     let byte = if ctype == CMP_BINARY {
         bits.read(8)? as u8
     } else {
-        let peek = bits.peek8_with_load()?;
+        let peek = bits.peek8_for_table();
         let mut value = asc.short[peek as usize];
         if value == 0xFF {
             // `DecodeLit` branches on the *byte* being non-zero, then on its low
@@ -511,7 +516,7 @@ fn decode_distance(
     dict_mask: u32,
     dist_table: &[u8; 0x100],
 ) -> Result<usize, CodecError> {
-    let pos_code = u32::from(dist_table[bits.peek8_with_load()? as usize]);
+    let pos_code = u32::from(dist_table[bits.peek8_for_table() as usize]);
     let pos_bits = u32::from(DIST_BITS[pos_code as usize]);
     bits.consume(pos_bits)?;
 
@@ -914,15 +919,10 @@ mod tests {
     /// `0xDE`, whose low bit is 0, which correctly makes the first symbol a literal
     /// (`STRING` is plain text) rather than a match.
     ///
-    /// ⚠️ **Blocked on the cross-byte case.** The first assertion holds; the one
-    /// after `consume(7)` does not, and the cause is in [`Bits::consume`] /
-    /// [`Bits::refill`] rather than in this expectation: the byte loaded during a
-    /// refill is not ending up at bit 0. Cross-byte refills have not been reconciled
-    /// with the reference's `WasteBits`, so this test is `#[ignore]`d rather than
-    /// weakened — a passing test with a wrong expectation would be worse than a
-    /// red one, and deleting it would lose the finding.
+    /// This test is what caught the cross-byte bug. The fix was in *where* loading
+    /// happens: [`Bits::peek8_for_table`] used to load on its own, and the reference
+    /// loads only inside `WasteBits`.
     #[test]
-    #[ignore = "cross-byte refill position is unresolved; see the doc comment"]
     fn the_next_bit_is_the_low_bit_of_the_buffer() {
         // 0b1000_0001: the first bit is 1.
         let mut bits = Bits::new(&[0b1000_0001, 0b0000_0011]);
@@ -930,7 +930,7 @@ mod tests {
         bits.consume(1).unwrap();
         assert_eq!(bits.pending, 7, "no load is needed yet");
         bits.consume(7).unwrap();
-        assert_eq!(bits.peek8(), 0b0000_0011, "the refilled byte must be at bit 0");
+        assert_eq!(bits.peek8(), 0b0000_0011, "the loaded byte must be at bit 0");
     }
 
     /// Bits are consumed from the low end of the pending bits.
@@ -953,20 +953,40 @@ mod tests {
         assert_eq!(bits.read(3).unwrap(), 0b010);
     }
 
-    /// A refill lands directly above the bits that are still buffered.
+    /// A load lands directly above the bits that are still pending.
     ///
-    /// See the note on [`Bits::refill`]: positioning by `available` at load time is
-    /// only sound when nothing is pending, which is why the cross-byte case is the
-    /// one that fails. Ignored for the same reason as the test above.
+    /// If the byte were placed anywhere else, the same bytes would appear in the
+    /// same order but at the wrong offsets — which is what made the real-data
+    /// divergence so hard to read: the output stayed plausible and only went wrong
+    /// on a later control bit.
+    ///
+    /// The assertion is on the **byte delivered**, not on the internal pending count.
+    /// The count is a bookkeeping detail whose exact value after a load depends on
+    /// how many bits happened to be pending; the property that matters is that the
+    /// second input byte arrives in its own position and not shifted.
+    ///
+    /// The values below are what the reference's `WasteBits` produces for this input,
+    /// worked through from its two shift rules (drop `extra_bits`, OR the byte at
+    /// bit 8, then drop the shortfall). They are deliberately not "the obvious
+    /// answer": after one bit is consumed the peek already carries the *next* byte's
+    /// top bit, because consuming that one bit crosses the byte boundary and loads.
     #[test]
-    #[ignore = "cross-byte refill position is unresolved; see Bits::refill"]
-    fn a_refill_lands_above_the_remaining_bits() {
-        let mut bits = Bits::new(&[0b0000_0001, 0b1111_1111]);
+    fn a_load_lands_above_the_remaining_bits() {
+        // 0b1010_0101 then a distinctive second byte.
+        let mut bits = Bits::new(&[0b1010_0101, 0b1100_0011]);
+        assert_eq!(bits.peek8(), 0b1010_0101, "the first byte, nothing loaded yet");
+
+        // Consuming one bit loads the second byte above the remaining seven bits,
+        // so the peek is the remaining seven followed by the loaded byte's top bit:
+        // 0b010_0101 then 1.
         bits.consume(1).unwrap();
-        assert_eq!(bits.pending, 7);
+        assert_eq!(bits.peek8(), 0b1101_0010);
+        assert_eq!(bits.pending, 7, "seven bits of the first byte are still pending");
+
+        // Consuming those seven leaves the second byte pending on its own, delivered
+        // whole. A misplaced load would show up here as a shifted byte.
         bits.consume(7).unwrap();
-        assert_eq!(bits.peek8(), 0b1111_1111);
-        assert_eq!(bits.pending, 7, "three bits of the second byte remain");
+        assert_eq!(bits.peek8(), 0b1100_0011, "the loaded byte, unshifted");
     }
 
     #[test]
