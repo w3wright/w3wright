@@ -1,6 +1,6 @@
 [package]
 name = "war3-meta"
-description = "Object field metadata and trigger definitions (SYLK / INI / TXT), split into a mechanical and an expressive layer."
+description = "Object field metadata and trigger definitions, read at runtime from the user's game installation (SYLK / INI / TXT)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

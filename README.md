@@ -19,21 +19,23 @@ and how far along it is.
 ## Status
 
 Phase 1 covers the W3X parser: everything needed to open a `.w3x` and read the
-metadata-class and terrain-class files inside it. It reads real maps and real
-Blizzard archives end to end.
+metadata-class, terrain-class and object-class files inside it, from real maps and
+real Blizzard archives. The archive write side exists as well; what is still
+missing is the source-project direction.
 
 | Crate | State | Contents |
 | --- | --- | --- |
 | `war3-core` | done | `FourCC`, `Vec3`, error and diagnostic machinery, injectable asset source |
-| `war3-archive` | done | Blizzard archive reading: header discovery, table decryption, hash lookup, enumeration ladder, sector decryption, hand-written inflate |
-| `war3-map` | done | `.w3i` (versions 0–33), `.wts`, `.imp`, map composition model |
+| `war3-archive` | done | Blizzard archive reading **and writing**: header discovery, table decryption, hash lookup, enumeration ladder, sector decryption, hand-written inflate, `ArchiveBuilder` |
+| `war3-map` | done | `.w3i` (versions 0–33), `.wts`, `.imp`, `war3map.doo`, `war3mapUnits.doo`, the map composition model |
 | `war3-terrain` | done | `.w3e` in both the v11 and v12 layouts, plus a SYLK reader |
-| `war3-meta` | done | SYLK metadata tables and `TriggerData.txt` trigger definitions |
+| `war3-meta` | done | object field metadata read from the game's `*MetaData.slk`, `TriggerData.txt` trigger definitions, the editor-data type registry |
+| `war3-object` | done | object data (`.w3u` and friends): inheritance, field typing, `TRIGSTR_` resolution |
 | `war3-cli` | done | the `war3` binary |
-| `war3-object` | not started | object data (`.w3u` and friends) |
-| writing `.w3x` | not started | the build direction |
+| `.w3x` round trip | partial | `war3 map rebuild` rewrites an archive member by member; the **source-project** direction (`extract` / `build`) is Phase 2 |
+| `war3-wtg` | not started | trigger data (`.wtg` / `.wct`); prototype scope is a lossless round trip only |
 
-**199 unit tests pass and `cargo clippy --all-targets` is clean.** The dependency
+**255 tests pass (`cargo test --workspace`) and `cargo clippy --all-targets` is clean.** The dependency
 set is empty apart from the crates in this workspace, including the zlib
 decompressor, so the core builds for WASM and with a plain Rust toolchain.
 
@@ -43,8 +45,10 @@ decompressor, so the core builds for WASM and with a plain Rust toolchain.
 | --- | --- |
 | `D:\Warcraft3\war3.mpq` | hash table decrypts (22084 of 32768 slots empty); **10684 members** in the block table |
 | `D:\Warcraft3\War3xlocal.mpq` | 1133 members |
-| `(4)LostTemple.w3m` | 16 members by name; `.w3i` v18, `.w3e` v11 (161x161 tile points), `war3map.j` 72697 bytes of JASS |
-| `ydwe-sample-1.19.w3x` | `.w3i` v25, `.w3e` v11, `.w3u`, and a non-ASCII map name via the string table |
+| `(4)LostTemple.w3m` | 16 members by name; `.w3i` v18, `.w3e` v11 (161x161 tile points), `war3map.j` 72697 bytes of JASS, **5317 doodads**; its `war3mapUnits.doo` is **v7/sub9 and still unparsed** — reported with an offset, never guessed |
+| `ydwe-sample-1.19.w3x` | `.w3i` v25, `.w3e` v11, `.w3u`, **125 placed units**, and a non-ASCII map name (`YDWE的UI演示`) via the string table |
+| `war3 map rebuild` | `(4)LostTemple.w3m` → **16 of 16 members byte-identical** (238.5 KB from a 245.2 KB source); both rebuild modes (`--stored` too) load in the game client |
+| `war3 meta check D:\Warcraft3` | 7 field-metadata tables (267 unit fields, 747 ability fields, …) and 164 trigger types / 1389 actions |
 
 Extraction is byte-identical to an independent implementation of the format for
 `war3map.w3i`, `war3map.w3e` and `war3map.j`.
@@ -53,6 +57,8 @@ Extraction is byte-identical to an independent implementation of the format for
 `war3map.wts` and Blizzard's own `(listfile)` use. Huffman, bzip2 and ADPCM are
 reported as unsupported too. See
 [`examples/lost-temple/README.md`](examples/lost-temple/README.md).
+An imploded member is not lost on a rebuild: it is copied across verbatim, and
+`TRIGSTR_` references that need it stay unresolved and are diagnosed.
 
 
 ---
@@ -68,12 +74,21 @@ cargo build --release
 # Archive structure. Run this first when a map will not open.
 ./target/release/war3 map archive "<map>"
 
-# Terrain statistics.
+# Terrain statistics, placed doodads, placed units.
 ./target/release/war3 map terrain "<map>"
+./target/release/war3 map doodads "<map>"
+./target/release/war3 map units "<map>"
+
+# Object data. Field ids become readable names when a game directory is given;
+# without one they are printed as FourCCs.
+./target/release/war3 map objects "<map>" --game-dir "D:\Warcraft3"
 
 # Member listing, and extracting a single member.
 ./target/release/war3 map list "<map>"
 ./target/release/war3 map file "<map>" war3map.w3i > w3i.bin
+
+# Rewrite the archive with this workspace's writer, and verify the result.
+./target/release/war3 map rebuild "<map>" out.w3x
 
 # Check whether metadata and trigger definitions can be found locally.
 ./target/release/war3 meta check "D:\Warcraft3"
@@ -94,10 +109,11 @@ w3wright/
 ├── Cargo.toml                 # virtual manifest, members = ["crates/*"]
 ├── crates/
 │   ├── war3-core/             # FourCC / Vec3 / errors / diagnostics / AssetSource
-│   ├── war3-archive/          # Blizzard archive reading + a hand-written inflate
-│   ├── war3-map/              # .w3i / .wts / .imp and the map composition model
+│   ├── war3-archive/          # Blizzard archive reading and writing + a hand-written inflate
+│   ├── war3-map/              # .w3i / .wts / .imp / .doo / war3mapUnits.doo and the map model
 │   ├── war3-terrain/          # .w3e v11 and v12, plus SYLK
 │   ├── war3-meta/             # object field metadata and trigger definitions
+│   ├── war3-object/           # object data (.w3u and friends)
 │   └── war3-cli/              # umbrella crate providing the war3 binary
 ├── examples/                  # test map samples (binaries are gitignored)
 └── README.md, README_CN.md
@@ -107,10 +123,11 @@ w3wright/
 
 ```text
 war3-cli  <- umbrella crate, the only one producing a binary
-  ├── war3-map  -> war3-archive, war3-terrain, war3-core
-  ├── war3-meta -> war3-terrain, war3-core
-  ├── war3-archive  -> war3-core
-  └── war3-terrain  -> war3-core
+  ├── war3-map     -> war3-archive, war3-terrain, war3-core
+  ├── war3-object  -> war3-meta, war3-core
+  ├── war3-meta    -> war3-terrain, war3-core
+  ├── war3-archive -> war3-core
+  └── war3-terrain -> war3-core
 ```
 
 `war3-cli` depends on the others; none of the others depends on `war3-cli`.

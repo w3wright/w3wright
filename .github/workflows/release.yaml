@@ -125,6 +125,35 @@ jobs:
         run: cargo build --workspace --all-targets --locked
 
   # ---------------------------------------------------------------------------
+  # WASM. The core is supposed to stay compilable for the browser target, and
+  # without a job that is only a claim in the README. This is what stops a
+  # platform-specific dependency, or a `std::fs` call in the wrong crate, from
+  # creeping in unnoticed.
+  #
+  # `war3-cli` is excluded: it is the binary, and a binary has no wasm build.
+  # ---------------------------------------------------------------------------
+  wasm:
+    name: WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Add the wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      # Every crate this builds is a library, so cargo emits an rlib and no
+      # linker or extra wasm tooling runs.
+      - name: Build the core crates for wasm32
+        run: cargo build --workspace --exclude war3-cli --target wasm32-unknown-unknown --locked
+
+  # ---------------------------------------------------------------------------
   # crates.io. The order below is the dependency order and is not negotiable:
   # cargo publish resolves each dependency against the live registry, so a
   # crate cannot be published before everything it depends on.
@@ -138,7 +167,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to crates.io
-    needs: [ test, msrv ]
+    needs: [ test, msrv, wasm ]
     runs-on: ubuntu-latest
     # `inputs` is null outside workflow_dispatch, and `!null` evaluates to true,
     # so the event has to be named explicitly rather than inferred from the

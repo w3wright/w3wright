@@ -17,23 +17,25 @@ Warcraft III 地图开发平台，Rust 实现。
 
 ## 当前进度
 
-Phase 1 覆盖 W3X 解析器：打开一张 `.w3x`，读出里面的元数据类与地形类文件。
-真实地图与真实暴雪归档现在都能端到端读通。
+Phase 1 覆盖 W3X 解析器：打开一张 `.w3x`，读出里面的元数据类、地形类与对象类文件。
+真实地图与真实暴雪归档现在都能端到端读通。归档的**写侧也已可用**；
+缺的是"源工程"那个方向。
 
 | Crate | 状态 | 内容 |
 | --- | --- | --- |
 | `war3-core` | ✅ | `FourCC`、`Vec3`、错误与诊断机制、可注入资产源 |
-| `war3-archive` | ✅ | 暴雪归档读取：头扫描、表解密、哈希查找、枚举阶梯、扇区解密、自写 inflate |
-| `war3-map` | ✅ | `.w3i`（版本 0–33）、`.wts`、`.imp`、Map 组合模型 |
+| `war3-archive` | ✅ | 暴雪归档**读取与写入**：头扫描、表解密、哈希查找、枚举阶梯、扇区解密、自写 inflate、`ArchiveBuilder` |
+| `war3-map` | ✅ | `.w3i`（版本 0–33）、`.wts`、`.imp`、`war3map.doo`、`war3mapUnits.doo`、Map 组合模型 |
 | `war3-terrain` | ✅ | `.w3e` 的 v11 与 v12 两种布局，以及 SYLK 解析 |
-| `war3-meta` | ✅ | SYLK 元数据表与 `TriggerData.txt` 触发定义 |
+| `war3-meta` | ✅ | 从游戏安装的 `*MetaData.slk` 读对象字段元数据、`TriggerData.txt` 触发定义、编辑器数据类型表 |
+| `war3-object` | ✅ | 对象数据（`.w3u` 等）：继承、字段类型、`TRIGSTR_` 解析 |
 | `war3-cli` | ✅ | `war3` 二进制 |
-| `war3-object` | ⬜ | 对象数据（`.w3u` 等） |
-| `.w3x` 写回 | ⬜ | build 方向 |
+| `.w3x` 往返 | ⚠️ 部分 | `war3 map rebuild` 逐成员回写归档；**源工程**方向的 `extract` / `build` 属 Phase 2 |
+| `war3-wtg` | ⬜ | 触发器数据（`.wtg` / `.wct`）：原型范围只做无损往返（ADR-0016） |
 
-**199 个单测全绿，`cargo clippy --all-targets` 无警告。** 除本工作区内的 crate
-外没有任何依赖 —— 连 zlib 解压都是自己实现的，因此核心能编到 WASM，也能用纯
-Rust 工具链构建。
+**255 个测试全绿（`cargo test --workspace`），`cargo clippy --all-targets` 无警告。**
+除本工作区内的 crate 外没有任何依赖 —— 连 zlib 解压都是自己实现的，因此核心能编到
+WASM，也能用纯 Rust 工具链构建。
 
 ### 现在能读出什么
 
@@ -41,14 +43,18 @@ Rust 工具链构建。
 | --- | --- |
 | `D:\Warcraft3\war3.mpq` | 哈希表解出（32768 槽里 22084 个空槽）；块表里 **10684 个成员** |
 | `D:\Warcraft3\War3xlocal.mpq` | 1133 个成员 |
-| `(4)LostTemple.w3m` | 按名字列出 16 个成员；`.w3i` v18、`.w3e` v11（161x161 点位）、`war3map.j` 72697 字节 JASS |
-| `ydwe-sample-1.19.w3x` | `.w3i` v25、`.w3e` v11、`.w3u`，以及经字符串表解析出的非 ASCII 地图名 |
+| `(4)LostTemple.w3m` | 按名字列出 16 个成员；`.w3i` v18、`.w3e` v11（161x161 点位）、`war3map.j` 72697 字节 JASS、**5317 个装饰物**；它的 `war3mapUnits.doo` 是 **v7/sub9，仍未解出** —— 报出偏移而不是猜 |
+| `ydwe-sample-1.19.w3x` | `.w3i` v25、`.w3e` v11、`.w3u`、**125 个已放置单位**，以及经字符串表解析出的非 ASCII 地图名（`YDWE的UI演示`） |
+| `war3 map rebuild` | `(4)LostTemple.w3m` → **16/16 成员逐字节一致**（源 245.2 KB，产物 238.5 KB） |
+| `war3 meta check D:\Warcraft3` | 7 张字段元数据表（单位 267 字段、技能 747 字段…）与 164 种触发类型 / 1389 个动作 |
 
 对 `war3map.w3i`、`war3map.w3e`、`war3map.j` 的导出与一份独立实现逐字节一致。
 
 **尚未支持：PKWare implode**（`0x08` 扇区），地图的 `war3map.wts` 与暴雪自己的
 `(listfile)` 都用它。Huffman、bzip2、ADPCM 同样会被如实报告为不支持。详见
 [`examples/lost-temple/README.md`](examples/lost-temple/README.md)。
+imploded 成员在重写时不会丢：它被原样搬运；依赖它的 `TRIGSTR_` 引用保持未解析
+并报出诊断。
 
 ---
 
@@ -63,12 +69,20 @@ cargo build --release
 # 归档结构 —— 地图读不出来时先跑这个
 ./target/release/war3 map archive "<地图>"
 
-# 地形统计
+# 地形统计、已放置的装饰物、已放置的单位
 ./target/release/war3 map terrain "<地图>"
+./target/release/war3 map doodads "<地图>"
+./target/release/war3 map units "<地图>"
+
+# 对象数据。给了游戏目录，字段 ID 会变成可读名；不给就打成 FourCC。
+./target/release/war3 map objects "<地图>" --game-dir "D:\Warcraft3"
 
 # 成员清单，以及导出单个成员
 ./target/release/war3 map list "<地图>"
 ./target/release/war3 map file "<地图>" war3map.w3i > w3i.bin
+
+# 用本工作区的写入器重写归档，并校验产物
+./target/release/war3 map rebuild "<地图>" out.w3x
 
 # 检查本地安装里能否找到元数据与触发定义
 ./target/release/war3 meta check "D:\Warcraft3"
@@ -87,10 +101,11 @@ w3wright/
 ├── Cargo.toml                 # 虚拟清单，members = ["crates/*"]
 ├── crates/
 │   ├── war3-core/             # FourCC / Vec3 / 错误 / 诊断 / AssetSource
-│   ├── war3-archive/          # 暴雪归档读取 + 自写 inflate
-│   ├── war3-map/              # .w3i / .wts / .imp + Map 组合模型
+│   ├── war3-archive/          # 暴雪归档读写 + 自写 inflate
+│   ├── war3-map/              # .w3i / .wts / .imp / .doo / war3mapUnits.doo + Map 组合模型
 │   ├── war3-terrain/          # .w3e v11 与 v12 + SYLK
 │   ├── war3-meta/             # 对象字段元数据 + 触发定义
+│   ├── war3-object/           # 对象数据（.w3u 等）
 │   └── war3-cli/              # 伞包，提供 war3 二进制
 ├── examples/                  # 测试地图样本（二进制被 .gitignore 排除）
 └── README.md, README_CN.md
@@ -100,10 +115,11 @@ w3wright/
 
 ```text
 war3-cli  ← 伞包，唯一提供二进制的包
-  ├── war3-map  → war3-archive, war3-terrain, war3-core
-  ├── war3-meta → war3-terrain, war3-core
-  ├── war3-archive  → war3-core
-  └── war3-terrain  → war3-core
+  ├── war3-map     → war3-archive, war3-terrain, war3-core
+  ├── war3-object  → war3-meta, war3-core
+  ├── war3-meta    → war3-terrain, war3-core
+  ├── war3-archive → war3-core
+  └── war3-terrain → war3-core
 ```
 
 `war3-cli` 依赖其他；其他包都不依赖 `war3-cli`。

@@ -1041,7 +1041,8 @@ fn read_block_table(
 /// Uppercases a name and maps `/` to `\`, keeping separators.
 ///
 /// This is the form used both for hashing and for deriving decryption keys, so
-/// the uppercasing must match [`crypto::hash_string`]'s exactly: **ASCII only**.
+/// the uppercasing must match [`crypto::hash_string`](crate::crypto::hash_string)'s
+/// exactly: **ASCII only**.
 /// Unicode uppercasing can change a name's byte length (`ß` becomes `SS`), which
 /// silently changes its hash and therefore makes imported files with non-ASCII
 /// names unresolvable.

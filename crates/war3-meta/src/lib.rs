@@ -4,15 +4,18 @@
 //!
 //! | Layer | Content | Handling |
 //! | --- | --- | --- |
-//! | mechanical | field identifiers, type codes, `index`/`repeat`/`data`, ranges, `WESTRING_*` **keys** | prebuilt, shipped with the repository |
+//! | mechanical | field identifiers, type codes, `index`/`repeat`/`data`, ranges, `WESTRING_*` **keys** | read at runtime from the user's installation |
 //! | expressive | the actual text behind those keys | read at runtime from the user's installation, never shipped |
 //!
-//! The boundary is a file boundary already: `displayname` in `metadata.ini` holds
-//! a key such as `WESTRING_AEVAL_AARE`, and the text lives in
-//! `UI\WorldEditStrings.txt`.
+//! Nothing from either layer ships with this repository: there is no prebuilt
+//! metadata table and no Blizzard-derived data file in the tree. A user without
+//! the game installed still parses and edits maps, but sees FourCCs where field
+//! names would be. Whether the mechanical layer should instead be prebuilt and
+//! shipped is an open design question (ADR-0011, Q19 in the `docs/` set).
 //!
-//! When adding metadata to this repository, add keys and structure only, never
-//! display text.
+//! The boundary is a file boundary already: the `displayName` column of a
+//! `*MetaData.slk` holds a key such as `WESTRING_UEVAL_UNAM`, and the text lives
+//! in `UI\WorldEditStrings.txt`.
 //!
 //! # Where the data comes from
 //!

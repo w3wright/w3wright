@@ -15,7 +15,7 @@
 #   - community maps need the author's permission individually.
 #
 # To get a sample, place your own, or run
-# `cargo run --example make_synthetic -p war3-mpq` to generate a structurally
+# `cargo run --example make_synthetic -p war3-archive` to generate a structurally
 # valid archive.
 *.w3x
 *.w3m

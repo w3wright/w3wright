@@ -1,6 +1,6 @@
 [package]
 name = "war3-archive"
-description = "MPQ container reading: hash and block tables, sector decompression, member enumeration."
+description = "MPQ container reading and writing: hash and block tables, sector decompression, member enumeration, archive rebuild."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

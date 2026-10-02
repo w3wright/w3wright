@@ -1,6 +1,6 @@
 [package]
 name = "war3-map"
-description = "Map composition model and metadata-class file parsing (w3i / wts / imp). Excludes terrain and object data."
+description = "Map composition model and map file parsing (w3i / wts / imp / doo / war3mapUnits.doo). Excludes terrain and object data."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
