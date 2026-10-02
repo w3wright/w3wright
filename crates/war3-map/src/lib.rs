@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+mod bytes;
 pub mod cursor;
 pub mod doodads;
 pub mod imports;

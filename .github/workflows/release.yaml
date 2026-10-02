@@ -160,10 +160,14 @@ jobs:
   #
   #   war3-core
   #     ├── war3-archive
+  #     │     └── war3-project
   #     └── war3-terrain
   #           ├── war3-meta
+  #           │     └── war3-object
   #           └── war3-map  (also needs war3-archive)
-  #                 └── war3-cli
+  #
+  # war3-cli is absent on purpose: it is a binary and ships as a GitHub Release
+  # artifact, which is what map authors want, rather than through `cargo install`.
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to crates.io
@@ -240,7 +244,7 @@ jobs:
           # before everything it depends on. war3-cli is absent on purpose -- it
           # is a binary and ships as a GitHub Release artifact, which is what
           # map authors want, rather than through `cargo install`.
-          order="war3-core war3-archive war3-terrain war3-meta war3-map"
+          order="war3-core war3-archive war3-terrain war3-meta war3-object war3-map war3-project"
 
           # Publishing is attempted directly rather than gated behind a
           # "is it already there?" probe, because every such probe available

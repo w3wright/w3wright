@@ -30,6 +30,7 @@
 use war3_core::diag::{Diagnostic, DiagnosticCode, Diagnostics};
 use war3_core::{FourCC, ParseError, Vec3};
 
+use crate::bytes::{len, push_f32, push_i32, push_vec3};
 use crate::cursor::Cursor;
 use crate::doodads::DOO_MAGIC;
 
@@ -102,8 +103,16 @@ pub struct RandomChoice {
 ///
 /// The type id is `uDNR` or `iDNR` when this applies; the payload is present in
 /// every record regardless, which is why it is modelled rather than skipped.
+///
+/// One correction from measurement: the flag also accepts **`-1`**, meaning no
+/// payload follows at all. 45 of the maps on this machine carry it, and the four
+/// bytes after it belong to the *next* field. An earlier attempt to explain those
+/// as a version difference (version 7 having no block) broke 20 maps that had been
+/// parsing and fixed none, so the rule is "the value decides", not the version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RandomPayload {
+    /// No random payload: the flag is `-1` and nothing follows it.
+    None,
     /// Any unit or item of a level and class.
     Any {
         /// Three-byte level, `-1` (all three bytes `0xFF`) meaning any.
@@ -142,6 +151,12 @@ pub struct Unit {
     pub flags: u8,
     /// Owning player, 0-based; 16 is neutral passive.
     pub player: i32,
+    /// Two bytes the format has where this build knows of no field.
+    ///
+    /// Consumed and **kept**: a write has to reproduce them, and "the meaning is
+    /// unknown" is not a licence to write zeros. They are reported when they are
+    /// not zero, which is what makes them worth keeping rather than ignoring.
+    pub unknown: [u8; 2],
     /// Hit points, or -1 for the type's default.
     pub hit_points: i32,
     /// Mana, -1 for default and 0 for a unit with no mana.
@@ -182,6 +197,12 @@ pub struct UnitFile {
     pub subversion: i32,
     /// The placed units and items.
     pub units: Vec<Unit>,
+    /// Bytes after the last unit that the format does not place.
+    ///
+    /// Reported as [`DiagnosticCode::DooTrailingBytes`] **and kept**: the warning
+    /// says the record layout may be incomplete for this map, and a write must not
+    /// then shorten the file.
+    pub trailing: Vec<u8>,
     /// Diagnostics collected while parsing.
     pub diagnostics: Diagnostics,
 }
@@ -309,8 +330,17 @@ impl UnitFile {
                 });
             }
 
+            // The random-unit flag. A hypothesis worth recording because the corpus
+            // killed it: "version 7 has no random block, so what looks like a flag
+            // is the colour field" reads well and is **wrong** — gating the block on
+            // the version broke 20 version-7 files that had been parsing and
+            // round-tripping, and fixed none. The 45 maps that do fail here fail
+            // because their flag is `-1`, which is a different question.
             let random_flag = cursor.i32()?;
             let random = match random_flag {
+                // `-1`: nothing follows. Decided by the value, not the version —
+                // see the note on `RandomPayload`.
+                -1 => RandomPayload::None,
                 0 => {
                     let level = cursor.take(3)?;
                     RandomPayload::Any {
@@ -361,6 +391,7 @@ impl UnitFile {
                 scale,
                 flags,
                 player,
+                unknown,
                 hit_points,
                 mana,
                 item_table,
@@ -378,13 +409,14 @@ impl UnitFile {
             });
         }
 
-        if !cursor.is_at_end() {
+        let leftover = cursor.remaining();
+        let trailing = cursor.take(leftover)?.to_vec();
+        if leftover > 0 {
             diagnostics.push(Diagnostic::warn(
                 DiagnosticCode::DooTrailingBytes,
                 format!(
-                    "{} bytes follow the last unit; the record layout may be incomplete for this \
-                     map, so treat the parse as suspect",
-                    cursor.remaining()
+                    "{leftover} bytes follow the last unit; the record layout may be incomplete for \
+                     this map, so treat the parse as suspect, but they are kept verbatim"
                 ),
             ));
         }
@@ -393,8 +425,115 @@ impl UnitFile {
             version,
             subversion,
             units,
+            trailing,
             diagnostics,
         })
+    }
+
+    /// Serialises back to `war3mapUnits.doo` bytes.
+    ///
+    /// # Why this mirrors `parse` line for line
+    ///
+    /// A unit record is forty-odd fields with four nested tables, and the game
+    /// reads them by position: one field written in the wrong place and every unit
+    /// after it is garbage. So the version gates are the ones `parse` applies, the
+    /// counts are the lengths of the lists that were read, and nothing is
+    /// normalised — including the two bytes per record whose meaning this build
+    /// does not know ([`Unit::unknown`]) and whatever followed the last unit
+    /// ([`Self::trailing`]).
+    ///
+    /// The `unwrap_or` fallbacks only fire for a model built by hand rather than by
+    /// [`Self::parse`]; a file that came from `parse` always carries the fields its
+    /// version requires.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let has_hero_fields = self.version >= HERO_FIELD_VERSION;
+        let mut out = Vec::new();
+        out.extend_from_slice(&DOO_MAGIC);
+        push_i32(&mut out, self.version);
+        push_i32(&mut out, self.subversion);
+        push_i32(&mut out, len(&self.units));
+
+        for unit in &self.units {
+            out.extend_from_slice(&unit.kind.to_bytes());
+            push_i32(&mut out, unit.variation);
+            push_vec3(&mut out, unit.position);
+            push_f32(&mut out, unit.rotation);
+            push_vec3(&mut out, unit.scale);
+            out.push(unit.flags);
+            push_i32(&mut out, unit.player);
+            out.extend_from_slice(&unit.unknown);
+            push_i32(&mut out, unit.hit_points);
+            push_i32(&mut out, unit.mana);
+            if has_hero_fields {
+                push_i32(&mut out, unit.item_table.unwrap_or(-1));
+            }
+
+            push_i32(&mut out, len(&unit.drop_sets));
+            for set in &unit.drop_sets {
+                push_i32(&mut out, len(&set.drops));
+                for drop in &set.drops {
+                    out.extend_from_slice(&drop.item.to_bytes());
+                    push_i32(&mut out, drop.chance);
+                }
+            }
+
+            push_i32(&mut out, unit.gold);
+            push_f32(&mut out, unit.target_acquisition);
+            push_i32(&mut out, unit.hero_level);
+            if has_hero_fields {
+                let hero = unit.hero.unwrap_or(HeroAttributes {
+                    strength: 0,
+                    agility: 0,
+                    intelligence: 0,
+                });
+                push_i32(&mut out, hero.strength);
+                push_i32(&mut out, hero.agility);
+                push_i32(&mut out, hero.intelligence);
+            }
+
+            push_i32(&mut out, len(&unit.inventory));
+            for item in &unit.inventory {
+                push_i32(&mut out, item.slot);
+                out.extend_from_slice(&item.item.to_bytes());
+            }
+
+            push_i32(&mut out, len(&unit.abilities));
+            for ability in &unit.abilities {
+                out.extend_from_slice(&ability.ability.to_bytes());
+                push_i32(&mut out, ability.autocast);
+                push_i32(&mut out, ability.level);
+            }
+
+            match &unit.random {
+                RandomPayload::None => push_i32(&mut out, -1),
+                RandomPayload::Any { level, item_class } => {
+                    push_i32(&mut out, 0);
+                    out.extend_from_slice(level);
+                    out.push(*item_class);
+                }
+                RandomPayload::Group { group, position } => {
+                    push_i32(&mut out, 1);
+                    push_i32(&mut out, *group);
+                    push_i32(&mut out, *position);
+                }
+                RandomPayload::Table { choices } => {
+                    push_i32(&mut out, 2);
+                    push_i32(&mut out, len(choices));
+                    for choice in choices {
+                        out.extend_from_slice(&choice.kind.to_bytes());
+                        push_i32(&mut out, choice.chance);
+                    }
+                }
+            }
+
+            push_i32(&mut out, unit.color);
+            push_i32(&mut out, unit.waygate);
+            push_i32(&mut out, unit.creation_number);
+        }
+
+        out.extend_from_slice(&self.trailing);
+        out
     }
 }
 
@@ -460,6 +599,43 @@ mod tests {
             b.extend_from_slice(r);
         }
         b
+    }
+
+    #[test]
+    fn every_fixture_writes_back_byte_for_byte() {
+        for version in [7, 8] {
+            let v8 = version >= HERO_FIELD_VERSION;
+            for items in [0, 1, 3] {
+                for abilities in [0, 2] {
+                    let bytes = build(
+                        version,
+                        &[
+                            record(b"hfoo", v8, items, abilities),
+                            record(b"ngol", v8, 0, 0),
+                        ],
+                    );
+                    let parsed = UnitFile::parse(&bytes).unwrap();
+                    assert_eq!(
+                        parsed.to_bytes(),
+                        bytes,
+                        "version {version}, {items} inventory, {abilities} abilities"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bytes_after_the_last_unit_are_kept_not_just_reported() {
+        let mut bytes = build(8, &[record(b"hfoo", true, 1, 1)]);
+        bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let parsed = UnitFile::parse(&bytes).unwrap();
+        assert_eq!(parsed.trailing, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(
+            parsed.to_bytes(),
+            bytes,
+            "the warning says the layout may be incomplete; the bytes still have to come back"
+        );
     }
 
     #[test]

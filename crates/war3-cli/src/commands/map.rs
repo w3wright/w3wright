@@ -20,6 +20,8 @@ USAGE:
   war3 map objects <map> [--game-dir <dir>]  object data, named via the metadata
                                              when a game directory is given
   war3 map archive <map>                     MPQ archive structure
+  war3 map extract <map> <dir> [--drop-unnamed]
+                                             write the map out as a source project
   war3 map rebuild <in> <out> [options]      rewrite the archive with our writer
                                              --stored       re-encode members we can decode
                                              --drop-unnamed drop members that have no name
@@ -42,6 +44,7 @@ pub fn run(args: &[String]) -> Result<ExitCode> {
         "units" => units(rest),
         "objects" => objects(rest),
         "archive" => archive(rest),
+        "extract" => extract(rest),
         "rebuild" => rebuild(rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
@@ -53,6 +56,40 @@ pub fn run(args: &[String]) -> Result<ExitCode> {
             Ok(ExitCode::from(2))
         }
     }
+}
+
+/// `war3 map extract`.
+///
+/// The format-level half of the build direction: a map becomes a directory, and
+/// the manifest records what each member became. Its counterpart is
+/// `war3 build`, which is a top-level command because its input is a project.
+fn extract(args: &[String]) -> Result<ExitCode> {
+    const USAGE: &str = "war3 map extract <map> <dir> [--drop-unnamed]";
+    let input = required_arg(args, 0, "a map path", USAGE)?;
+    let dir = required_arg(args, 1, "an output directory", USAGE)?;
+    let drop_unnamed = args.iter().any(|a| a == "--drop-unnamed");
+
+    let report = war3_project::extract(
+        std::path::Path::new(input),
+        std::path::Path::new(dir),
+        drop_unnamed,
+    )?;
+
+    println!("extract  {input} -> {dir}");
+    println!("{}", "=".repeat(60));
+    outfmt::field("members", report.members, 22);
+    outfmt::field("textified", report.text, 22);
+    outfmt::field("decoded to files", report.binary, 22);
+    outfmt::field("kept as stored block", report.raw, 22);
+    outfmt::field("HM3W prefix", format!("{} bytes", report.prefix_bytes), 22);
+    outfmt::field("manifest", report.manifest.display().to_string(), 22);
+
+    let has_problems = outfmt::diagnostics(&report.diagnostics, verbose(args));
+    Ok(if has_problems {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn verbose(args: &[String]) -> bool {
@@ -202,7 +239,9 @@ fn info(args: &[String]) -> Result<ExitCode> {
             p.name,
             p.start_x,
             p.start_y,
-            if p.fixed_start_position {
+            // Any non-zero word means fixed; the exact value is preserved in the
+            // file but carries no meaning worth printing.
+            if p.fixed_start_position != 0 {
                 "  [fixed start]"
             } else {
                 ""

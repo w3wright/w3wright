@@ -33,6 +33,7 @@ use war3_core::diag::Diagnostics;
 use war3_core::{FourCC, ParseError, Vec3};
 
 use crate::cursor::Cursor;
+use crate::units::{DropSet, ItemDrop};
 
 /// Magic shared by `war3map.doo` and `war3mapUnits.doo`.
 pub const DOO_MAGIC: [u8; 4] = *b"W3do";
@@ -67,6 +68,13 @@ pub struct Doodad {
     pub flags: u8,
     /// Life as a percentage of the type's default.
     pub life: u8,
+    /// Pointer to a random item table in `war3map.w3i`, or `-1` for none.
+    pub item_table: i32,
+    /// Items the doodad drops, inline in the record.
+    ///
+    /// The same shape a placed unit uses, so it is the same type: one definition,
+    /// and a reader that understands one understands both.
+    pub item_sets: Vec<DropSet>,
     /// The World Editor's doodad number, unique per map.
     pub editor_id: i32,
 }
@@ -100,8 +108,27 @@ pub struct DoodadFile {
     pub doodads: Vec<Doodad>,
     /// The special doodads that follow them.
     pub special: Vec<SpecialDoodad>,
+    /// Bytes after the last special doodad that the format does not place.
+    ///
+    /// Reported as [`war3_core::DiagnosticCode::DooTrailingBytes`] **and kept**,
+    /// for the same reason `war3map.w3i` keeps its leftovers: a file this build
+    /// cannot fully place must not come back quietly shortened.
+    pub trailing: Vec<u8>,
     /// Diagnostics collected while parsing.
     pub diagnostics: Diagnostics,
+}
+
+/// `len` as the `i32` the format uses for count words.
+fn len<T>(list: &[T]) -> i32 {
+    i32::try_from(list.len()).unwrap_or(i32::MAX)
+}
+
+fn push_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_f32(out: &mut Vec<u8>, value: f32) {
+    out.extend_from_slice(&value.to_le_bytes());
 }
 
 impl DoodadFile {
@@ -147,24 +174,52 @@ impl DoodadFile {
             let scale = Vec3::new(cursor.f32()?, cursor.f32()?, cursor.f32()?);
             let flags = cursor.u8()?;
             let life = cursor.u8()?;
-            if version >= ITEM_FIELD_VERSION {
+            let (item_table, item_sets) = if version >= ITEM_FIELD_VERSION {
                 let pointer = cursor.i32()?;
                 let sets = cursor.i32()?;
-                // The record length past this point depends on the item sets,
-                // which no sample has ever carried. Guessing would desynchronise
-                // every later record, so this stops and says so.
-                if pointer != -1 || sets != 0 {
+                if !(0..=MAX_RECORDS).contains(&sets) {
                     return Err(ParseError::BadField {
                         field: "war3map.doo item sets",
                         reason: format!(
-                            "record {index} at offset {start} carries a random item table \
-                             (pointer {pointer}, {sets} item sets); this build does not read those"
+                            "record {index} at offset {start} declares {sets} item sets, which is \
+                             not a plausible number"
                         ),
                     });
                 }
-            }
+                let mut item_sets = Vec::with_capacity(sets as usize);
+                for _ in 0..sets {
+                    let items = cursor.i32()?;
+                    if !(0..=MAX_RECORDS).contains(&items) {
+                        return Err(ParseError::BadField {
+                            field: "war3map.doo item set size",
+                            reason: format!(
+                                "record {index} at offset {start} declares {items} items in a set, \
+                                 which is not a plausible number"
+                            ),
+                        });
+                    }
+                    let mut drops = Vec::with_capacity(items as usize);
+                    for _ in 0..items {
+                        drops.push(ItemDrop {
+                            item: cursor.fourcc()?,
+                            chance: cursor.i32()?,
+                        });
+                    }
+                    item_sets.push(DropSet { drops });
+                }
+                (pointer, item_sets)
+            } else {
+                (-1, Vec::new())
+            };
             let editor_id = cursor.i32()?;
-            debug_assert_eq!(cursor.position() - start, record_len);
+            // The record is a fixed length only while there are no item sets: each
+            // set costs a count word and each item costs an id and a chance word.
+            debug_assert_eq!(
+                cursor.position() - start,
+                record_len
+                    + 4 * item_sets.len()
+                    + 8 * item_sets.iter().map(|set| set.drops.len()).sum::<usize>()
+            );
             doodads.push(Doodad {
                 kind,
                 variation,
@@ -173,6 +228,8 @@ impl DoodadFile {
                 scale,
                 flags,
                 life,
+                item_table,
+                item_sets,
                 editor_id,
             });
         }
@@ -198,13 +255,14 @@ impl DoodadFile {
         }
 
         let mut diagnostics = Diagnostics::new();
-        if !cursor.is_at_end() {
+        // Kept, not merely noted: a write has to reproduce the file, and bytes this
+        // build cannot place are exactly the ones a normalising writer drops.
+        let leftover = cursor.remaining();
+        let trailing = cursor.take(leftover)?.to_vec();
+        if leftover > 0 {
             diagnostics.push(war3_core::Diagnostic::warn(
                 war3_core::DiagnosticCode::DooTrailingBytes,
-                format!(
-                    "{} bytes follow the special doodads; keeping the parse but noting them",
-                    cursor.remaining()
-                ),
+                format!("{leftover} bytes follow the special doodads; they are kept verbatim"),
             ));
         }
 
@@ -214,8 +272,65 @@ impl DoodadFile {
             special_version,
             doodads,
             special,
+            trailing,
             diagnostics,
         })
+    }
+
+    /// Serialises back to `war3map.doo` bytes.
+    ///
+    /// The version-8 item fields are written from the model, so a record with a
+    /// random item table round-trips like any other. That branch was once refused
+    /// outright ("no sample has ever carried it"); a real map disproved that, and
+    /// the layout was then taken from
+    /// [WC3MapSpecification `Doodads/8_11.md`](https://github.com/ChiefOfGxBxL/WC3MapSpecification)
+    /// rather than guessed — pointer, set count, then per set a count and
+    /// `(item, chance)` pairs.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&DOO_MAGIC);
+        push_i32(&mut out, self.version);
+        push_i32(&mut out, self.subversion);
+        push_i32(&mut out, len(&self.doodads));
+
+        for doodad in &self.doodads {
+            out.extend_from_slice(&doodad.kind.to_bytes());
+            push_i32(&mut out, doodad.variation);
+            push_f32(&mut out, doodad.position.x);
+            push_f32(&mut out, doodad.position.y);
+            push_f32(&mut out, doodad.position.z);
+            push_f32(&mut out, doodad.rotation);
+            push_f32(&mut out, doodad.scale.x);
+            push_f32(&mut out, doodad.scale.y);
+            push_f32(&mut out, doodad.scale.z);
+            out.push(doodad.flags);
+            out.push(doodad.life);
+            if self.version >= ITEM_FIELD_VERSION {
+                push_i32(&mut out, doodad.item_table);
+                push_i32(&mut out, len(&doodad.item_sets));
+                for set in &doodad.item_sets {
+                    push_i32(&mut out, len(&set.drops));
+                    for drop in &set.drops {
+                        out.extend_from_slice(&drop.item.to_bytes());
+                        push_i32(&mut out, drop.chance);
+                    }
+                }
+            }
+            push_i32(&mut out, doodad.editor_id);
+        }
+
+        push_i32(&mut out, self.special_version);
+        push_i32(&mut out, len(&self.special));
+        for special in &self.special {
+            out.extend_from_slice(&special.kind.to_bytes());
+            push_i32(&mut out, special.z);
+            push_i32(&mut out, special.x);
+            push_i32(&mut out, special.y);
+        }
+
+        out.extend_from_slice(&self.trailing);
+        out
     }
 
     /// How the doodad flags byte is usually read.
@@ -283,6 +398,39 @@ mod tests {
     }
 
     #[test]
+    fn every_fixture_writes_back_byte_for_byte() {
+        for version in [7, 8] {
+            for specials in [0, 1, 3] {
+                let bytes = build(
+                    version,
+                    11,
+                    &[record(b"LTlt", 2, 100, 7), record(b"B000", 0, 50, 9)],
+                    specials,
+                );
+                let parsed = DoodadFile::parse(&bytes).unwrap();
+                assert_eq!(
+                    parsed.to_bytes(),
+                    bytes,
+                    "version {version} with {specials} special doodads"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bytes_after_the_last_special_doodad_are_kept_not_just_reported() {
+        let mut bytes = build(7, 9, &[record(b"LTlt", 2, 100, 1)], 0);
+        bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let parsed = DoodadFile::parse(&bytes).unwrap();
+        assert_eq!(parsed.trailing, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(
+            parsed.to_bytes(),
+            bytes,
+            "a write must not shorten a file it only half places"
+        );
+    }
+
+    #[test]
     fn parses_a_version_7_file() {
         let bytes = build(7, 9, &[record(b"LTlt", 2, 100, 2244)], 1);
         let file = DoodadFile::parse(&bytes).unwrap();
@@ -319,15 +467,46 @@ mod tests {
     }
 
     #[test]
-    fn a_version_8_item_table_is_reported_not_guessed() {
-        let mut bytes = build(8, 11, &[record(b"LTlt", 2, 100, 7)], 0);
-        // The item-table pointer sits 38 bytes into the record, at offset 16.
-        bytes[16 + 8 + 12 + 4 + 12 + 2..16 + 8 + 12 + 4 + 12 + 2 + 4]
-            .copy_from_slice(&5i32.to_le_bytes());
-        let err = DoodadFile::parse(&bytes).unwrap_err();
-        assert!(
-            matches!(err, ParseError::BadField { field, .. } if field.contains("item sets")),
-            "{err}"
+    fn a_version_8_item_table_is_read_and_written_back() {
+        // The fixture builder's own record, with the item sets spliced in before
+        // the editor id, which is the last four bytes of a version-8 record.
+        let mut base = record(b"LTlt", 2, 100, 7);
+        let editor_id = base.split_off(base.len() - 4);
+        base.extend_from_slice(&(-1i32).to_le_bytes());
+        base.extend_from_slice(&1i32.to_le_bytes());
+        base.extend_from_slice(&2i32.to_le_bytes());
+        base.extend_from_slice(b"ratf");
+        base.extend_from_slice(&100i32.to_le_bytes());
+        base.extend_from_slice(b"ratc");
+        base.extend_from_slice(&50i32.to_le_bytes());
+        base.extend_from_slice(&editor_id);
+        // Assembled here rather than through `build`, so the header is exactly what
+        // `parse` reads: magic, version, subversion, count, records, then the
+        // special-doodad block.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&DOO_MAGIC);
+        bytes.extend_from_slice(&8i32.to_le_bytes());
+        bytes.extend_from_slice(&11i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&base);
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+
+        let file = DoodadFile::parse(&bytes).unwrap();
+        let doodad = &file.doodads[0];
+        assert_eq!(doodad.item_table, -1);
+        assert_eq!(doodad.item_sets.len(), 1);
+        assert_eq!(doodad.item_sets[0].drops.len(), 2);
+        assert_eq!(
+            doodad.item_sets[0].drops[1].item.as_str().as_deref(),
+            Some("ratc")
+        );
+        assert_eq!(doodad.item_sets[0].drops[1].chance, 50);
+        assert_eq!(doodad.editor_id, 7, "the editor id follows the item sets");
+        assert_eq!(
+            file.to_bytes(),
+            bytes,
+            "an item table has to come back as well as be read"
         );
     }
 

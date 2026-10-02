@@ -28,9 +28,10 @@ Phase 1 覆盖 W3X 解析器：打开一张 `.w3x`，读出里面的元数据类
 | `war3-map` | ✅ | `.w3i`（版本 0–33）、`.wts`、`.imp`、`war3map.doo`、`war3mapUnits.doo`、Map 组合模型 |
 | `war3-terrain` | ✅ | `.w3e` 的 v11 与 v12 两种布局，以及 SYLK 解析 |
 | `war3-meta` | ✅ | 从游戏安装的 `*MetaData.slk` 读对象字段元数据、`TriggerData.txt` 触发定义、编辑器数据类型表 |
-| `war3-object` | ✅ | 对象数据（`.w3u` 等）：继承、字段类型、`TRIGSTR_` 解析 |
+| `war3-object` | ✅ | 对象数据（`.w3u` 等）：继承、字段类型、`TRIGSTR_` 解析，**并能写回** —— 真实语料上 **7 种对象文件 137/137 个成员逐字节一致**（`cargo run --example objects_roundtrip -p war3-object -- <地图目录>`） |
+| `war3-project` | ⚠️ 部分 | 源工程：`war3 map extract` / `war3 validate` / `war3 build`。`war3map.w3i`、**7 种对象文件与 `war3map.doo`** 已文本化（改单位字段、装饰物坐标或地图描述，游戏能看到）；其余成员是解码后二进制或原样块；**成员只有在文本形式被证明能逐字节还原之后才会文本化** |
 | `war3-cli` | ✅ | `war3` 二进制 |
-| `.w3x` 往返 | ⚠️ 部分 | `war3 map rebuild` 逐成员回写归档；**源工程**方向的 `extract` / `build` 属 Phase 2 |
+| `.w3x` 往返 | ✅ 成员内容 | `war3 map rebuild` 逐成员回写归档；`extract` / `build` 让每个成员的内容逐字节往返 |
 | `war3-wtg` | ⬜ | 触发器数据（`.wtg` / `.wct`）：原型范围只做无损往返（ADR-0016） |
 
 **255 个测试全绿（`cargo test --workspace`），`cargo clippy --all-targets` 无警告。**
@@ -46,6 +47,9 @@ WASM，也能用纯 Rust 工具链构建。
 | `(4)LostTemple.w3m` | 按名字列出 16 个成员；`.w3i` v18、`.w3e` v11（161x161 点位）、`war3map.j` 72697 字节 JASS、**5317 个装饰物**；它的 `war3mapUnits.doo` 是 **v7/sub9，仍未解出** —— 报出偏移而不是猜 |
 | `ydwe-sample-1.19.w3x` | `.w3i` v25、`.w3e` v11、`.w3u`、**125 个已放置单位**，以及经字符串表解析出的非 ASCII 地图名（`YDWE的UI演示`） |
 | `war3 map rebuild` | `(4)LostTemple.w3m` → **16/16 成员逐字节一致**（源 245.2 KB，产物 238.5 KB） |
+| `.w3i` 重序列化 | **190 张图里 188 张 parse → 序列化逐字节一致**（`cargo run --example w3i_roundtrip -p war3-map -- <地图目录>`）；剩下的 2 张是 `war3map.w3i` 被 implode 压着 |
+| 放置数据重序列化 | `war3map.doo` **188/188 逐字节一致**（735,618 个装饰物）；`war3mapUnits.doo` **175/175**（26,826 个单位）：`cargo run --release --example doodads_roundtrip -p war3-map -- <地图目录>` |
+| 源工程往返 | 整条 `extract → build` 链跑遍本机所有地图，逐图打印成员去向与每一条拒绝理由：`cargo run --release --example project_regression -p war3-project -- <地图目录>` |
 | `war3 meta check D:\Warcraft3` | 7 张字段元数据表（单位 267 字段、技能 747 字段…）与 164 种触发类型 / 1389 个动作 |
 
 对 `war3map.w3i`、`war3map.w3e`、`war3map.j` 的导出与一份独立实现逐字节一致。
@@ -54,7 +58,8 @@ WASM，也能用纯 Rust 工具链构建。
 `(listfile)` 都用它。Huffman、bzip2、ADPCM 同样会被如实报告为不支持。详见
 [`examples/lost-temple/README.md`](examples/lost-temple/README.md)。
 imploded 成员在重写时不会丢：它被原样搬运；依赖它的 `TRIGSTR_` 引用保持未解析
-并报出诊断。
+并报出诊断。本机 193 张图实测：**5 张因 `(listfile)` 被 implode 压着而完全枚举不出来**，
+另有 13 张因 listfile 缺失或被削减（见 `docs/` 的 Q20）。
 
 ---
 
@@ -84,6 +89,11 @@ cargo build --release
 # 用本工作区的写入器重写归档，并校验产物
 ./target/release/war3 map rebuild "<地图>" out.w3x
 
+# 源工程：地图变目录，再变回地图
+./target/release/war3 map extract "<地图>" my-project/
+./target/release/war3 validate my-project/          # 只读：一次报出所有问题，有问题退出码 2
+./target/release/war3 build my-project/ --out rebuilt.w3x
+
 # 检查本地安装里能否找到元数据与触发定义
 ./target/release/war3 meta check "D:\Warcraft3"
 ```
@@ -106,6 +116,7 @@ w3wright/
 │   ├── war3-terrain/          # .w3e v11 与 v12 + SYLK
 │   ├── war3-meta/             # 对象字段元数据 + 触发定义
 │   ├── war3-object/           # 对象数据（.w3u 等）
+│   ├── war3-project/          # 源工程：extract / build
 │   └── war3-cli/              # 伞包，提供 war3 二进制
 ├── examples/                  # 测试地图样本（二进制被 .gitignore 排除）
 └── README.md, README_CN.md
@@ -116,6 +127,7 @@ w3wright/
 ```text
 war3-cli  ← 伞包，唯一提供二进制的包
   ├── war3-map     → war3-archive, war3-terrain, war3-core
+  ├── war3-project → war3-archive, war3-core
   ├── war3-object  → war3-meta, war3-core
   ├── war3-meta    → war3-terrain, war3-core
   ├── war3-archive → war3-core

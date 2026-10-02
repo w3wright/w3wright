@@ -112,6 +112,23 @@ pub enum DiagnosticCode {
     // ---- assets ----
     /// A display name degraded to a key name or raw identifier.
     AssetFallbackUsed,
+
+    // ---- source project ----
+    /// A member could not be decoded, so its stored block was kept instead.
+    ///
+    /// This is not a failure: it is the honest form for a member this workspace
+    /// has no decompressor for, and the block survives a round trip untouched.
+    ProjectMemberKeptRaw,
+    /// A member name could not be used as a file name and was percent-encoded.
+    ///
+    /// The manifest keeps the mapping, so nothing is lost — but the file on disk
+    /// is no longer named like the member, which is worth knowing.
+    ProjectNameEncoded,
+    /// A member has a text form, but it is stored as binary.
+    ///
+    /// Either producing it failed or it did not reproduce the file byte for byte.
+    /// The member is still written correctly; it is just not reviewable as text.
+    ProjectMemberKeptBinary,
 }
 
 impl DiagnosticCode {
@@ -143,6 +160,9 @@ impl DiagnosticCode {
             Self::ObjectExtraTable => "object.extra-table",
             Self::ObjectTrailingBytes => "object.trailing-bytes",
             Self::AssetFallbackUsed => "asset.fallback-used",
+            Self::ProjectMemberKeptRaw => "project.member-kept-raw",
+            Self::ProjectNameEncoded => "project.name-encoded",
+            Self::ProjectMemberKeptBinary => "project.member-kept-binary",
         }
     }
 }

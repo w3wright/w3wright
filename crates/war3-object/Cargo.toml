@@ -10,3 +10,11 @@ rust-version.workspace = true
 [dependencies]
 war3-core = { workspace = true }
 war3-meta = { workspace = true }
+
+# Only `examples/objects_roundtrip.rs` needs to open map archives: parsing and
+# writing object data is independent of the container it arrived in, so the
+# library itself does not depend on the archive reader. Cargo builds examples
+# with the package's dev-dependencies, which is where a dependency used by
+# nothing but an example belongs.
+[dev-dependencies]
+war3-archive = { workspace = true }

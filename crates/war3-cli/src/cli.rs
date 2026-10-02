@@ -25,7 +25,10 @@ COMMANDS:
   map units <map>            print the placed units and items
   map objects <map>          print the map's object data
   map archive <map>          print MPQ archive structure
+  map extract <map> <dir>    write the map out as a source project
   map rebuild <in> <out>     rewrite an archive with this workspace's writer
+  build <dir>                build an archive from a source project
+  validate <dir>             check a source project without building it
   meta check <game-dir>      check whether metadata and trigger definitions are findable
   help                       show this help
 
@@ -48,6 +51,8 @@ pub fn run(args: &[String]) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         "map" => commands::map::run(&args[1..]),
+        "build" => commands::project::run(&args[1..]),
+        "validate" => commands::project::validate(&args[1..]),
         "meta" => commands::meta::run(&args[1..]),
         other => {
             eprintln!("war3: unknown command {other:?}");
@@ -102,6 +107,18 @@ mod tests {
     }
 
     #[test]
+    fn build_without_a_project_exits_two() {
+        let code = run(&["build".into()]).unwrap();
+        assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(2)));
+    }
+
+    #[test]
+    fn validate_without_a_project_exits_two() {
+        let code = run(&["validate".into()]).unwrap();
+        assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::from(2)));
+    }
+
+    #[test]
     fn required_arg_reports_the_usage_line() {
         let args: Vec<String> = vec![];
         let err = required_arg(&args, 0, "a map path", "war3 map info <map>").unwrap_err();
@@ -119,7 +136,10 @@ mod tests {
             "map units",
             "map objects",
             "map archive",
+            "map extract",
             "map rebuild",
+            "build <dir>",
+            "validate <dir>",
             "meta check",
         ] {
             assert!(HELP.contains(cmd), "help is missing {cmd}");

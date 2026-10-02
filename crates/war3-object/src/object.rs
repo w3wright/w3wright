@@ -29,9 +29,11 @@
 //! zero — an extra table with no entries. Those bytes used to be reported as
 //! unexplained trailing data.
 //!
-//! The count of tables is not modelled, because an empty table carries nothing;
-//! a writer that emits two is writing a valid file. An extra table that is *not*
-//! empty is still reported, since that would be data this build cannot place.
+//! The count of tables is not *meaningful*, because an empty table carries
+//! nothing, but it is recorded — see [`ObjectFile::extra_tables`]. A writer that
+//! emits two is writing a valid file, and one that emits what the input carried
+//! reproduces it. An extra table that is *not* empty is still reported, since
+//! that would be data this build cannot place.
 //!
 //! # The two rules that are easy to miss
 //!
@@ -52,6 +54,16 @@
 //! ignores an unknown field and discards a mismatched one; here the value is
 //! kept as parsed and the caller is told via diagnostics, because a silently
 //! dropped modification is indistinguishable from one that was never there.
+//!
+//! # Writing
+//!
+//! [`ObjectFile::to_bytes`] reproduces the bytes `parse` was given, not a tidied
+//! version of them, because the prototype's hard metric is that a member
+//! survives `extract → build` byte for byte. Three things exist in the model for
+//! no other reason than that: [`Modification::tail`], [`ObjectFile::extra_tables`]
+//! and [`ObjectFile::trailing`]. Each is bytes the format leaves to the writer
+//! or that this build cannot place — which is exactly when a write is tempted to
+//! invent them.
 
 use war3_core::diag::{Diagnostic, DiagnosticCode, Diagnostics};
 use war3_core::{FourCC, ParseError};
@@ -111,7 +123,17 @@ pub struct Modification {
     /// `level` starts at 1 — or is 0 for a value that applies to every level —
     /// and the data indicator selects which of the `DataA..DataI` columns a
     /// value belongs to.
+    ///
+    /// Which kinds carry the block is a property of the kind, not of this field:
+    /// see [`is_levelled`]. A `None` here on a levelled kind is a hand-built
+    /// model, not a file that omitted the block.
     pub level: Option<Levelled>,
+    /// The four bytes after the value, which the game ignores.
+    ///
+    /// They are kept so that a write can reproduce the input. Every file seen
+    /// fills them with zeros, but "the game ignores it" is not "it is absent": a
+    /// file that puts something else there must not have it quietly zeroed.
+    pub tail: [u8; MOD_TAIL_LEN],
 }
 
 /// The level block of a levelled modification.
@@ -308,6 +330,20 @@ pub struct ObjectFile {
     pub version: i32,
     /// The two tables.
     pub table: ObjectTable,
+    /// How many empty tables followed the custom table.
+    ///
+    /// The format allows the `count` plus entries block to repeat and real files
+    /// carry a third one, always with a count of zero. An empty table has no
+    /// entries to keep, so the only thing worth recording is that it was there:
+    /// [`Self::to_bytes`] writes this many zero words, which is what keeps a
+    /// write from normalising a three-block file to the documented two.
+    pub extra_tables: usize,
+    /// Bytes after the last table that are not an empty table.
+    ///
+    /// Reported as [`DiagnosticCode::ObjectTrailingBytes`] **and kept**, because
+    /// failing to place a byte is not a licence to drop it: a file this build
+    /// only half understands must not come back quietly shortened.
+    pub trailing: Vec<u8>,
     /// Diagnostics collected while parsing.
     pub diagnostics: Diagnostics,
 }
@@ -349,11 +385,15 @@ impl ObjectFile {
         let left = reader.remaining();
         let tail = reader.take(left)?;
         let mut extra_tables = 0usize;
+        // Bytes the format does not place. Kept verbatim rather than dropped,
+        // since the report below only counts them.
+        let mut trailing = Vec::new();
         if !tail.is_empty() && tail.len() % 4 == 0 && tail.iter().all(|&b| b == 0) {
             extra_tables = tail.len() / 4;
         } else {
             // Not a table block. Put it back so the report names the offset.
             reader.seek(reader.len() - tail.len());
+            trailing = tail.to_vec();
         }
         if extra_tables > 0 {
             diagnostics.push(Diagnostic::info(
@@ -379,9 +419,121 @@ impl ObjectFile {
             kind,
             version,
             table: ObjectTable { original, custom },
+            extra_tables,
+            trailing,
             diagnostics,
         })
     }
+
+    /// Serialises back to the object file's bytes.
+    ///
+    /// # Why this mirrors `parse` line for line
+    ///
+    /// The hard metric is that a member survives `extract → build` byte for
+    /// byte, so this has to reproduce the *input* rather than a tidied version of
+    /// it: the same version, the same ids in the same order, the same counts, and
+    /// the bytes the format leaves to the writer written back as they were read
+    /// ([`Modification::tail`], [`Self::extra_tables`], [`Self::trailing`]).
+    ///
+    /// # The level block follows the kind, not the value
+    ///
+    /// `parse` reads `level` and `data_indicator` for abilities, doodads and
+    /// upgrades and for nothing else — that is the rule the layout is built on,
+    /// not a per-record flag. The write is therefore gated on
+    /// [`is_levelled`]`(self.kind)` rather than on [`Modification::level`] being
+    /// `Some`, so a model built by hand writes the layout its kind promises,
+    /// which is the one the game will read.
+    ///
+    /// # About the `unwrap_or` fallback
+    ///
+    /// It only fires for a model built by hand: a `Modification` that came from
+    /// `parse` of a levelled kind always carries its block. A model that would
+    /// serialise differently from its source shows up as a byte difference, which
+    /// is what the round-trip tests and `war3 map extract`'s self-check look for.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let levelled = is_levelled(self.kind);
+        let mut out = Vec::new();
+        push_i32(&mut out, self.version);
+        push_i32(&mut out, len(&self.table.original));
+        for object in &self.table.original {
+            push_object(&mut out, object, levelled, false);
+        }
+        push_i32(&mut out, len(&self.table.custom));
+        for object in &self.table.custom {
+            push_object(&mut out, object, levelled, true);
+        }
+        // One zero word per extra empty table: the block the format allows to
+        // repeat, written as many times as the input carried it.
+        for _ in 0..self.extra_tables {
+            push_i32(&mut out, 0);
+        }
+        out.extend_from_slice(&self.trailing);
+        out
+    }
+}
+
+/// Writes one object: its two ids, its modification count and its modifications.
+///
+/// The tables disagree about which id comes first — the original table stores
+/// `(id, zero)` and the custom table `(parent, new id)` — and `parse` folds both
+/// into `id` and `base_id`. This is that fold undone.
+fn push_object(out: &mut Vec<u8>, object: &Object, levelled: bool, custom: bool) {
+    let (first, second) = if custom {
+        (object.base_id, object.id)
+    } else {
+        (object.id, object.base_id)
+    };
+    out.extend_from_slice(&first.to_bytes());
+    out.extend_from_slice(&second.to_bytes());
+    push_i32(out, len(&object.modifications));
+    for modification in &object.modifications {
+        push_modification(out, modification, levelled);
+    }
+}
+
+/// Writes one modification: field id, type code, level block, value, tail.
+fn push_modification(out: &mut Vec<u8>, modification: &Modification, levelled: bool) {
+    out.extend_from_slice(&modification.field.to_bytes());
+    // `value_type` inverts the `FieldType::from_code` dispatch `parse` uses to
+    // decide how many bytes to read, so the code written is the code read.
+    push_i32(out, value_type(&modification.value).code());
+    if levelled {
+        let block = modification.level.unwrap_or(Levelled {
+            level: 0,
+            data_indicator: 0,
+        });
+        push_i32(out, block.level);
+        push_i32(out, block.data_indicator);
+    }
+    match &modification.value {
+        FieldValue::Integer(v) => push_i32(out, *v),
+        FieldValue::Real(v) | FieldValue::Unreal(v) => push_f32(out, *v),
+        FieldValue::String(s) => push_cstr(out, s),
+    }
+    out.extend_from_slice(&modification.tail);
+}
+
+/// `len` as the `i32` the format uses for count words.
+fn len<T>(list: &[T]) -> i32 {
+    i32::try_from(list.len()).unwrap_or(i32::MAX)
+}
+
+fn push_i32(out: &mut Vec<u8>, v: i32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn push_f32(out: &mut Vec<u8>, v: f32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Writes a C string: the bytes, then the terminator.
+///
+/// `parse` refuses a string that is not UTF-8, so what was decoded is exactly
+/// what the file held and this cannot differ from it.
+fn push_cstr(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(s.as_bytes());
+    out.push(0);
 }
 
 /// A minimal cursor that reports offsets, since the interesting failures here
@@ -547,11 +699,14 @@ impl<'a> Reader<'a> {
                     });
                 }
             };
-            self.take(MOD_TAIL_LEN)?;
+            let tail = self.take(MOD_TAIL_LEN)?;
+            let mut kept_tail = [0u8; MOD_TAIL_LEN];
+            kept_tail.copy_from_slice(tail);
             mods.push(Modification {
                 field,
                 value,
                 level,
+                tail: kept_tail,
             });
         }
         Ok(mods)
@@ -620,6 +775,22 @@ mod tests {
         b
     }
 
+    /// Asserts that a fixture comes back out of `to_bytes` exactly as it went in.
+    ///
+    /// Every fixture built in this module is fed through this, because a
+    /// serialiser is only as good as the bytes it reproduces: an assertion on the
+    /// model alone would pass just as happily on a write that drops a table, a
+    /// level block or a tail.
+    fn assert_round_trips(kind: ObjectKind, bytes: &[u8]) {
+        let parsed = ObjectFile::parse(kind, bytes)
+            .unwrap_or_else(|e| panic!("the fixture has to parse before it can be written: {e}"));
+        assert_eq!(
+            parsed.to_bytes(),
+            bytes,
+            "the fixture has to serialise back to the bytes it was parsed from"
+        );
+    }
+
     #[test]
     fn parses_a_units_file() {
         let bytes = file(
@@ -628,6 +799,7 @@ mod tests {
             &[object(b"hpea", b"h000", &[mod_int(b"uhpm", 420, None)])],
         );
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
         assert_eq!(parsed.version, 2);
         assert_eq!(parsed.table.original.len(), 1);
         assert_eq!(parsed.table.custom.len(), 1);
@@ -659,6 +831,7 @@ mod tests {
             )],
         );
         let parsed = ObjectFile::parse(ObjectKind::Ability, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Ability, &bytes);
         let custom = &parsed.table.custom[0];
         assert_eq!(
             custom.modifications[0].level,
@@ -700,6 +873,7 @@ mod tests {
         );
         // The same bytes as a unit file are fine.
         assert!(ObjectFile::parse(ObjectKind::Unit, &bytes).is_ok());
+        assert_round_trips(ObjectKind::Unit, &bytes);
     }
 
     #[test]
@@ -736,6 +910,7 @@ mod tests {
         // same shape is fine there.
         let bytes = file(2, &[object(b"hpea", b"\0\0\0\0", &[])], &[]);
         assert!(ObjectFile::parse(ObjectKind::Unit, &bytes).is_ok());
+        assert_round_trips(ObjectKind::Unit, &bytes);
     }
 
     #[test]
@@ -750,6 +925,7 @@ mod tests {
             )],
         );
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
         let custom = parsed.table.get(FourCC(*b"h001")).unwrap();
         let resolved = parsed.table.resolve(custom);
         assert_eq!(resolved.len(), 3);
@@ -766,6 +942,7 @@ mod tests {
             &[object(b"hfoo", b"h000", &[mod_int(b"uhpm", 2, None)])],
         );
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
         let found = parsed.table.get(FourCC(*b"h000")).unwrap();
         assert!(found.is_custom(), "the custom entry must win");
     }
@@ -781,6 +958,7 @@ mod tests {
             // The custom table stores (parent, new id) in that order.
             let bytes = file(2, &[], &[object(b"hfoo", id, &[])]);
             let parsed = ObjectFile::parse(kind, &bytes).unwrap();
+            assert_round_trips(kind, &bytes);
             let object = &parsed.table.custom[0];
             assert_eq!(object.id.to_bytes(), *id, "{kind:?}");
             assert_eq!(
@@ -812,6 +990,7 @@ mod tests {
             )],
         );
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
         let mut diagnostics = Diagnostics::new();
         parsed.table.diagnose_against(
             |id| match &id.0 {
@@ -838,6 +1017,7 @@ mod tests {
             )],
         );
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
         let mut diagnostics = Diagnostics::new();
         parsed
             .table
@@ -867,6 +1047,7 @@ mod tests {
             )],
         );
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
         let mut diagnostics = Diagnostics::new();
         parsed
             .table
@@ -890,7 +1071,9 @@ mod tests {
         let mut bytes = file(2, &[], &[]);
         bytes.extend_from_slice(&[0xAB; 4]);
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
         assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.trailing, vec![0xAB; 4]);
         assert!(parsed
             .diagnostics
             .items()
@@ -907,7 +1090,12 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes());
 
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
         assert!(parsed.table.is_empty());
+        assert_eq!(
+            parsed.extra_tables, 1,
+            "the third block is recorded, not assumed"
+        );
         let codes: Vec<_> = parsed.diagnostics.items().iter().map(|d| d.code).collect();
         assert!(
             !codes.contains(&DiagnosticCode::ObjectTrailingBytes),
@@ -923,6 +1111,8 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes());
         bytes.extend_from_slice(&0i32.to_le_bytes());
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
+        assert_eq!(parsed.extra_tables, 2);
         let info = parsed
             .diagnostics
             .items()
@@ -939,6 +1129,12 @@ mod tests {
         let mut bytes = file(2, &[], &[]);
         bytes.extend_from_slice(&1i32.to_le_bytes());
         let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Unit, &bytes);
+        assert_eq!(
+            parsed.trailing,
+            vec![1, 0, 0, 0],
+            "a block that is not empty is kept, not swallowed as an empty table"
+        );
         let codes: Vec<_> = parsed.diagnostics.items().iter().map(|d| d.code).collect();
         assert!(
             codes.contains(&DiagnosticCode::ObjectTrailingBytes),
@@ -959,9 +1155,102 @@ mod tests {
             )],
         );
         let parsed = ObjectFile::parse(ObjectKind::Ability, &bytes).unwrap();
+        assert_round_trips(ObjectKind::Ability, &bytes);
         assert_eq!(
             parsed.table.custom[0].modifications[0].level.unwrap().level,
             0
         );
+    }
+
+    #[test]
+    fn a_modification_tail_that_is_not_zero_is_kept() {
+        // The four bytes after each value are ignored by the game, but ignored is
+        // not absent: a file that carries something else there has to come back
+        // unchanged rather than with its tail zeroed.
+        let mut m = mod_int(b"uhpm", 420, None);
+        let tail = m.len() - MOD_TAIL_LEN;
+        m[tail..].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let bytes = file(2, &[], &[object(b"hpea", b"h000", &[m])]);
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_eq!(
+            parsed.table.custom[0].modifications[0].tail,
+            [0xDE, 0xAD, 0xBE, 0xEF]
+        );
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn an_original_object_whose_second_id_is_not_zero_is_kept() {
+        // The original table's second id is zero by design, but a file that put
+        // something else in that word must not come back with it zeroed: it is
+        // stored as `base_id` and written back in the same position.
+        let bytes = file(2, &[object(b"hpea", b"XXXX", &[])], &[]);
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_eq!(parsed.table.original[0].base_id.to_bytes(), *b"XXXX");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn the_version_is_written_back_as_it_was_read() {
+        // Version 1 shares this layout, so a version 1 file parses — and writing
+        // a constant 2 would upgrade a file that was not this build's to upgrade.
+        let bytes = file(
+            1,
+            &[],
+            &[object(b"hpea", b"h000", &[mod_int(b"uhpm", 420, None)])],
+        );
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn a_trailing_run_that_is_not_a_whole_number_of_words_is_kept() {
+        // Five zero bytes are neither an empty table nor nothing: the empty-table
+        // test is applied to the whole run, and a run that fails it is kept.
+        let mut bytes = file(2, &[], &[]);
+        bytes.extend_from_slice(&[0u8; 5]);
+        let parsed = ObjectFile::parse(ObjectKind::Unit, &bytes).unwrap();
+        assert_eq!(parsed.extra_tables, 0);
+        assert_eq!(parsed.trailing, vec![0u8; 5]);
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn a_levelled_kind_writes_the_level_block_even_when_the_model_omits_it() {
+        // Which layout a file has is a property of its kind, which is why
+        // `to_bytes` asks the kind rather than the modification. A caller that
+        // builds an ability without a level would otherwise write bytes the game
+        // reads as a units file.
+        let model = ObjectFile {
+            kind: ObjectKind::Ability,
+            version: 2,
+            table: ObjectTable {
+                original: Vec::new(),
+                custom: vec![Object {
+                    id: FourCC(*b"A001"),
+                    base_id: FourCC(*b"AIlf"),
+                    modifications: vec![Modification {
+                        field: FourCC(*b"Ilif"),
+                        value: FieldValue::Integer(100),
+                        level: None,
+                        tail: [0; MOD_TAIL_LEN],
+                    }],
+                }],
+            },
+            extra_tables: 0,
+            trailing: Vec::new(),
+            diagnostics: Diagnostics::new(),
+        };
+        let expected = file(
+            2,
+            &[],
+            &[object(
+                b"AIlf",
+                b"A001",
+                &[mod_int(b"Ilif", 100, Some((0, 0)))],
+            )],
+        );
+        assert_eq!(model.to_bytes(), expected);
     }
 }

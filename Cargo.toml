@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/w3wright/w3wright"
@@ -18,12 +18,29 @@ rust-version = "1.75"
 # workspace, and the packaged manifest fails to verify. It has to be kept in
 # step with `[workspace.package] version`; `cargo package --workspace` catches
 # it immediately when it is not.
-war3-core = { path = "crates/war3-core", version = "0.0.2" }
-war3-archive = { path = "crates/war3-archive", version = "0.0.2" }
-war3-map = { path = "crates/war3-map", version = "0.0.2" }
-war3-terrain = { path = "crates/war3-terrain", version = "0.0.2" }
-war3-meta = { path = "crates/war3-meta", version = "0.0.2" }
-war3-object = { path = "crates/war3-object", version = "0.0.2" }
+#
+# ⚠️ It also has to be a version that is **not already on crates.io**. A version
+# key that matches a published release makes the verification build resolve that
+# published (and by then stale) crate instead of the workspace copy, so the
+# packaged crate is compiled against yesterday's API. Bumping the workspace
+# version is what makes `cargo package --workspace` verify against this tree.
+#
+# ⚠️ Locally there is a second trap with the same symptom: Cargo treats a crate
+# from the temporary packaging registry as immutable, so it will happily reuse an
+# rlib compiled from an earlier `.crate` at the same name and version — even after
+# the API changed. `target/package` removal alone does not clear that. The reliable
+# check is a fresh target directory:
+#
+#     $env:CARGO_TARGET_DIR = "$env:TEMP\w3-fresh"; cargo package --workspace
+#
+# CI never sees either trap: a fresh checkout has no cache and no stale tarball.
+war3-core = { path = "crates/war3-core", version = "0.0.3" }
+war3-archive = { path = "crates/war3-archive", version = "0.0.3" }
+war3-map = { path = "crates/war3-map", version = "0.0.3" }
+war3-terrain = { path = "crates/war3-terrain", version = "0.0.3" }
+war3-meta = { path = "crates/war3-meta", version = "0.0.3" }
+war3-object = { path = "crates/war3-object", version = "0.0.3" }
+war3-project = { path = "crates/war3-project", version = "0.0.3" }
 
 [profile.release]
 lto = "thin"

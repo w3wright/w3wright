@@ -233,7 +233,13 @@ pub struct Player {
     /// 0 = random, 1 = human, 2 = orc, 3 = undead, 4 = night elf.
     pub race: i32,
     /// Fixed start position.
-    pub fixed_start_position: bool,
+    /// The raw "fixed start position" word. Non-zero means fixed.
+    ///
+    /// Kept as the word rather than as a `bool`, because real maps write more than
+    /// one non-zero spelling (`1` and `2` both occur) and a write has to reproduce
+    /// the one that was there. Normalising `2` to `1` changes the file, which is
+    /// exactly what the round-trip check exists to catch.
+    pub fixed_start_position: i32,
     /// Player name.
     pub name: String,
     /// Start position X.
@@ -291,6 +297,19 @@ impl From<i32> for UpgradeState {
             1 => Self::Available,
             2 => Self::Researched,
             other => Self::Unknown(other),
+        }
+    }
+}
+
+impl UpgradeState {
+    /// The value the file stores, so a write reproduces the read.
+    #[must_use]
+    pub const fn to_i32(self) -> i32 {
+        match self {
+            Self::NotAvailable => 0,
+            Self::Available => 1,
+            Self::Researched => 2,
+            Self::Unknown(v) => v,
         }
     }
 }
@@ -383,6 +402,28 @@ pub struct WaterTint {
     pub a: u8,
 }
 
+/// Which of the trailing sections a file actually carried.
+///
+/// Their presence is decided by "are there bytes left?", not by the version, so
+/// **a section with a count of zero and an absent section are different files**.
+/// Recording which ones were there is what lets a write tell them apart, the same
+/// way `terrain: Option<Terrain>` separates "no `.w3e`" from "zero tiles".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TrailingSections {
+    /// The player section.
+    pub players: bool,
+    /// The force section (version 3 and above).
+    pub forces: bool,
+    /// The upgrade section.
+    pub upgrades: bool,
+    /// The tech section (version 7 and above).
+    pub tech: bool,
+    /// The random unit table section (version 12 and above).
+    pub random_units: bool,
+    /// The random item table section (version 24 and above).
+    pub random_items: bool,
+}
+
 /// Everything `war3map.w3i` holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapInfo {
@@ -458,6 +499,26 @@ pub struct MapInfo {
     pub graphics_modes: Option<i32>,
     /// Game data version (version 30 and above): 0 = RoC, 1 = TFT.
     pub game_data_version: Option<i32>,
+    /// Bytes read before the camera bounds whose meaning is not decoded
+    /// (versions 8 and below).
+    ///
+    /// Kept verbatim rather than dropped: a file this build no longer sees is
+    /// still a file it has to be able to write back, and "not decoded" is not a
+    /// licence to lose bytes.
+    pub legacy_pre_camera: Vec<u8>,
+    /// The four bytes versions 2 to 8 carry between the playable size and the
+    /// flags. Same reasoning as [`Self::legacy_pre_camera`].
+    pub legacy_post_size: Vec<u8>,
+    /// Bytes read after the game data version (versions 32 and above).
+    pub legacy_post_data_version: Vec<u8>,
+    /// Bytes left over after the trailing sections.
+    ///
+    /// Non-empty means a field of that version is missing from this build. It is
+    /// reported as [`DiagnosticCode::W3iTrailingBytesLeft`] **and kept**, so
+    /// writing the file back reproduces what was there.
+    pub trailing: Vec<u8>,
+    /// Which trailing sections the file carried, including empty ones.
+    pub trailing_sections: TrailingSections,
     /// Players.
     pub players: Vec<Player>,
     /// Forces.
@@ -536,18 +597,17 @@ impl MapInfo {
             None
         };
 
-        // Historical fields for versions up to 8. The values are discarded, but
-        // they must still be read or everything after them shifts.
+        // Historical fields for versions up to 8: their meaning is not decoded,
+        // but they are kept byte for byte so the file can be written back
+        // unchanged (see `legacy_pre_camera`).
+        let mut legacy_pre_camera = Vec::new();
         if format_version <= 3 {
-            cursor.take(4)?;
-            cursor.take(4)?;
+            legacy_pre_camera.extend_from_slice(cursor.take(4)?);
+            legacy_pre_camera.extend_from_slice(cursor.take(4)?);
         } else if format_version <= 8 {
-            cursor.f32()?;
-            cursor.i32()?;
-            cursor.f32()?;
-            cursor.f32()?;
-            cursor.f32()?;
-            cursor.i32()?;
+            for _ in 0..6 {
+                legacy_pre_camera.extend_from_slice(cursor.take(4)?);
+            }
         }
 
         let mut camera_bounds = [0f32; 8];
@@ -564,9 +624,11 @@ impl MapInfo {
         let playable_width = cursor.i32()?;
         let playable_height = cursor.i32()?;
 
-        if (2..=8).contains(&format_version) {
-            cursor.i32()?;
-        }
+        let legacy_post_size = if (2..=8).contains(&format_version) {
+            cursor.take(4)?.to_vec()
+        } else {
+            Vec::new()
+        };
         let flags = MapFlags(cursor.u32()?);
 
         let tileset = if format_version >= 8 {
@@ -689,14 +751,15 @@ impl MapInfo {
             None
         };
 
+        let mut legacy_post_data_version = Vec::new();
         if format_version >= 32 {
             // Forced camera zoom values. The semantics are not documented, but
             // they must be read or the trailing sections shift.
-            cursor.i32()?;
-            cursor.i32()?;
+            legacy_post_data_version.extend_from_slice(cursor.take(4)?);
+            legacy_post_data_version.extend_from_slice(cursor.take(4)?);
         }
         if format_version >= 33 {
-            cursor.i32()?;
+            legacy_post_data_version.extend_from_slice(cursor.take(4)?);
         }
 
         // ---- trailing sections ----
@@ -708,15 +771,30 @@ impl MapInfo {
         let mut random_units = Vec::new();
         let mut random_items = Vec::new();
 
+        let mut sections = TrailingSections::default();
+
+        // A section that fails to parse must not cost bytes. The cursor is rewound
+        // to that section's first byte and everything from there to the end is
+        // kept verbatim in `trailing`, so a file this build only half understands
+        // still writes back unchanged.
+        let mut opaque_tail_from: Option<usize> = None;
+
         if !cursor.is_at_end() {
+            let start = cursor.position();
             match read_players(&mut cursor, format_version) {
-                Ok(list) => players = list,
-                Err(e) => diagnostics.push(Diagnostic::warn(
-                    DiagnosticCode::W3iMissingTrailingData,
-                    format!(
-                        "the player section failed to parse; the rest of the tail was skipped: {e}"
-                    ),
-                )),
+                Ok(list) => {
+                    players = list;
+                    sections.players = true;
+                }
+                Err(e) => {
+                    diagnostics.push(Diagnostic::warn(
+                        DiagnosticCode::W3iMissingTrailingData,
+                        format!(
+                            "the player section failed to parse, so the tail is kept as-is: {e}"
+                        ),
+                    ));
+                    opaque_tail_from = Some(start);
+                }
             }
         } else {
             diagnostics.push(Diagnostic::warn(
@@ -725,49 +803,95 @@ impl MapInfo {
             ));
         }
 
-        if !cursor.is_at_end() && format_version >= 3 {
-            if let Ok(list) = read_forces(&mut cursor) {
-                forces = list;
+        if opaque_tail_from.is_none() && !cursor.is_at_end() && format_version >= 3 {
+            let start = cursor.position();
+            match read_forces(&mut cursor) {
+                Ok(list) => {
+                    forces = list;
+                    sections.forces = true;
+                }
+                Err(_) => opaque_tail_from = Some(start),
             }
         }
-        if !cursor.is_at_end() {
-            if let Ok(list) = read_upgrades(&mut cursor) {
-                upgrades = list;
+        if opaque_tail_from.is_none() && !cursor.is_at_end() {
+            let start = cursor.position();
+            match read_upgrades(&mut cursor) {
+                Ok(list) => {
+                    upgrades = list;
+                    sections.upgrades = true;
+                }
+                Err(_) => opaque_tail_from = Some(start),
             }
         }
-        if !cursor.is_at_end() && format_version >= 7 {
-            if let Ok(count) = cursor.i32() {
-                for _ in 0..count.max(0) {
-                    match cursor.fourcc() {
-                        Ok(id) => tech.push(id),
-                        Err(_) => break,
+        if opaque_tail_from.is_none() && !cursor.is_at_end() && format_version >= 7 {
+            let start = cursor.position();
+            match cursor.i32() {
+                Ok(count) => {
+                    sections.tech = true;
+                    let mut short = false;
+                    for _ in 0..count.max(0) {
+                        match cursor.fourcc() {
+                            Ok(id) => tech.push(id),
+                            Err(_) => {
+                                short = true;
+                                break;
+                            }
+                        }
+                    }
+                    if short {
+                        opaque_tail_from = Some(start);
                     }
                 }
+                Err(_) => opaque_tail_from = Some(start),
             }
         }
-        if !cursor.is_at_end() && format_version >= 12 {
-            if let Ok(list) = read_random_units(&mut cursor) {
-                random_units = list;
+        if opaque_tail_from.is_none() && !cursor.is_at_end() && format_version >= 12 {
+            let start = cursor.position();
+            match read_random_units(&mut cursor) {
+                Ok(list) => {
+                    random_units = list;
+                    sections.random_units = true;
+                }
+                Err(_) => opaque_tail_from = Some(start),
             }
         }
-        if !cursor.is_at_end() && format_version >= 24 {
-            if let Ok(list) = read_random_items(&mut cursor) {
-                random_items = list;
+        if opaque_tail_from.is_none() && !cursor.is_at_end() && format_version >= 24 {
+            let start = cursor.position();
+            match read_random_items(&mut cursor) {
+                Ok(list) => {
+                    random_items = list;
+                    sections.random_items = true;
+                }
+                Err(_) => opaque_tail_from = Some(start),
             }
         }
 
+        if let Some(start) = opaque_tail_from {
+            // The sections read before the failure stay; the rest is opaque.
+            cursor.seek(start)?;
+            diagnostics.push(Diagnostic::info(
+                DiagnosticCode::W3iMissingTrailingData,
+                format!(
+                    "{} bytes from offset {start} are kept verbatim: a trailing section could not \
+                     be parsed",
+                    cursor.remaining()
+                ),
+            ));
+        }
+
         // Leftover bytes are reported: they are the only signal that a version's
-        // field is missing from this implementation.
-        if cursor.remaining() > 0 {
+        // field is missing from this implementation. They are also **kept**, so
+        // that writing the file back does not quietly shorten it.
+        let leftover_at = cursor.position();
+        let remaining = cursor.remaining();
+        let trailing = cursor.take(remaining)?.to_vec();
+        if remaining > 0 {
             diagnostics.push(Diagnostic::warn(
                 DiagnosticCode::W3iTrailingBytesLeft,
                 format!(
-                    "{} bytes remain after parsing (offset {} of {}) -- a field of version {} may \
-                     be missing from this build",
-                    cursor.remaining(),
-                    cursor.position(),
-                    cursor.len(),
-                    format_version
+                    "{remaining} bytes remain after parsing (offset {leftover_at} of {}) -- a field \
+                     of version {format_version} may be missing from this build",
+                    cursor.len()
                 ),
             ));
         }
@@ -805,6 +929,11 @@ impl MapInfo {
             script_language,
             graphics_modes,
             game_data_version,
+            legacy_pre_camera,
+            legacy_post_size,
+            legacy_post_data_version,
+            trailing,
+            trailing_sections: sections,
             players,
             forces,
             upgrades,
@@ -814,16 +943,284 @@ impl MapInfo {
             diagnostics,
         })
     }
+
+    /// Serialises back to `war3map.w3i` bytes.
+    ///
+    /// # Why this mirrors `parse` line for line
+    ///
+    /// The prototype's hard metric is that a member survives `extract → build`
+    /// byte for byte, so this has to reproduce the *input* rather than a
+    /// normalised version of it: the same version gates, the same field order, and
+    /// the same bytes for the parts whose meaning this build does not decode
+    /// ([`Self::legacy_pre_camera`], [`Self::legacy_post_size`],
+    /// [`Self::legacy_post_data_version`], [`Self::trailing`]).
+    ///
+    /// # About the `unwrap_or` fallbacks
+    ///
+    /// They only fire for a model built by hand rather than by `parse`: a file
+    /// that came from `parse` always carries the fields its version requires.
+    /// A model that would serialise differently from its source shows up as a byte
+    /// difference, which is exactly what the round-trip tests and `war3 map
+    /// extract`'s self-check look for.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let v = self.format_version;
+        let mut out = Vec::new();
+
+        out.extend_from_slice(&v.to_le_bytes());
+        if v >= 16 {
+            push_i32(&mut out, self.save_count.unwrap_or(0));
+            push_i32(&mut out, self.editor_version.unwrap_or(0));
+        }
+        if v >= 27 {
+            for part in self.game_version.unwrap_or([0; 4]) {
+                push_i32(&mut out, part);
+            }
+        }
+        push_cstr(&mut out, &self.name);
+        push_cstr(&mut out, &self.author);
+        push_cstr(&mut out, &self.description);
+        if v >= 8 {
+            push_cstr(&mut out, self.recommended_players.as_deref().unwrap_or(""));
+        }
+
+        out.extend_from_slice(&self.legacy_pre_camera);
+        for bound in self.camera_bounds {
+            out.extend_from_slice(&bound.to_le_bytes());
+        }
+        if v >= 14 {
+            for edge in self.unplayable.unwrap_or([0; 4]) {
+                push_i32(&mut out, edge);
+            }
+        }
+        push_i32(&mut out, self.playable_width);
+        push_i32(&mut out, self.playable_height);
+        out.extend_from_slice(&self.legacy_post_size);
+        push_u32(&mut out, self.flags.0);
+
+        if v >= 8 {
+            out.push(self.tileset.unwrap_or(Tileset::Unknown(0)).to_byte());
+        }
+        if v >= 17 {
+            push_i32(&mut out, self.loading_screen_number.unwrap_or(-1));
+        }
+        if v >= 10 && v != 18 && v != 19 {
+            push_cstr(&mut out, self.loading_screen_path.as_deref().unwrap_or(""));
+        }
+        if v >= 10 {
+            push_cstr(&mut out, self.loading_screen_text.as_deref().unwrap_or(""));
+            if v >= 11 {
+                push_cstr(&mut out, self.loading_screen_title.as_deref().unwrap_or(""));
+                push_cstr(
+                    &mut out,
+                    self.loading_screen_subtitle.as_deref().unwrap_or(""),
+                );
+            }
+        }
+        if v >= 17 {
+            push_i32(&mut out, self.game_data_set.unwrap_or(0));
+        }
+        if v >= 13 && v != 18 && v != 19 {
+            push_cstr(&mut out, self.prologue_screen_path.as_deref().unwrap_or(""));
+        }
+        if v >= 13 {
+            push_cstr(&mut out, self.prologue_screen_text.as_deref().unwrap_or(""));
+            push_cstr(
+                &mut out,
+                self.prologue_screen_title.as_deref().unwrap_or(""),
+            );
+            push_cstr(
+                &mut out,
+                self.prologue_screen_subtitle.as_deref().unwrap_or(""),
+            );
+        }
+
+        if v >= 19 {
+            let fog = self.fog.as_ref();
+            push_i32(&mut out, fog.map_or(0, |f| f.style));
+            push_f32(&mut out, fog.map_or(0.0, |f| f.start_height));
+            push_f32(&mut out, fog.map_or(0.0, |f| f.end_height));
+            push_f32(&mut out, fog.map_or(0.0, |f| f.density));
+            out.extend_from_slice(&fog.map_or([0; 4], |f| f.color));
+        }
+        if v >= 21 {
+            out.extend_from_slice(
+                &self
+                    .global_weather
+                    .unwrap_or(FourCC::new([0; 4]))
+                    .to_bytes(),
+            );
+        }
+        if v >= 22 {
+            push_cstr(&mut out, self.sound_environment.as_deref().unwrap_or(""));
+        }
+        if v >= 23 {
+            out.push(self.light_environment.unwrap_or(0));
+        }
+        if v >= 25 {
+            let tint = self.water_tint.as_ref();
+            for byte in tint.map_or([0; 4], |t| [t.r, t.g, t.b, t.a]) {
+                out.push(byte);
+            }
+        }
+        // The script language has two homes; this is the main-block one, which
+        // only versions 26 and 27 use.
+        if v == 26 || v == 27 {
+            push_i32(&mut out, self.script_language.unwrap_or(-1));
+        }
+        if v >= 29 {
+            push_i32(&mut out, self.graphics_modes.unwrap_or(0));
+        }
+        if v >= 30 {
+            push_i32(&mut out, self.game_data_version.unwrap_or(0));
+        }
+        out.extend_from_slice(&self.legacy_post_data_version);
+
+        // ---- trailing sections ----
+        // Written exactly where `parse` found them: presence is a property of the
+        // file, recorded in `trailing_sections`, not of whether a list is empty.
+        let sections = self.trailing_sections;
+
+        if sections.players {
+            push_i32(&mut out, len(&self.players));
+            for player in &self.players {
+                push_i32(&mut out, player.slot);
+                push_i32(&mut out, player.player_type);
+                push_i32(&mut out, player.race);
+                push_i32(&mut out, player.fixed_start_position);
+                push_cstr(&mut out, &player.name);
+                push_f32(&mut out, player.start_x);
+                push_f32(&mut out, player.start_y);
+                if v >= 5 {
+                    push_u32(&mut out, player.ally_low_priority);
+                    push_u32(&mut out, player.ally_high_priority);
+                }
+                if v >= 31 {
+                    push_u32(&mut out, player.enemy_low_priority.unwrap_or(0));
+                    push_u32(&mut out, player.enemy_high_priority.unwrap_or(0));
+                }
+            }
+        }
+
+        if sections.forces {
+            push_i32(&mut out, len(&self.forces));
+            for force in &self.forces {
+                push_u32(&mut out, force.flags);
+                push_u32(&mut out, force.players);
+                push_cstr(&mut out, &force.name);
+            }
+        }
+
+        if sections.upgrades {
+            push_i32(&mut out, len(&self.upgrades));
+            for upgrade in &self.upgrades {
+                push_u32(&mut out, upgrade.players);
+                out.extend_from_slice(&upgrade.id.to_bytes());
+                push_i32(&mut out, upgrade.level);
+                push_i32(&mut out, upgrade.state.to_i32());
+            }
+        }
+
+        if sections.tech {
+            push_i32(&mut out, len(&self.tech));
+            for id in &self.tech {
+                out.extend_from_slice(&id.to_bytes());
+            }
+        }
+
+        if sections.random_units {
+            push_i32(&mut out, len(&self.random_units));
+            for table in &self.random_units {
+                push_i32(&mut out, table.group);
+                push_cstr(&mut out, &table.name);
+                push_i32(&mut out, len(&table.column_types));
+                for column in &table.column_types {
+                    push_i32(&mut out, *column);
+                }
+                push_i32(&mut out, len(&table.rows));
+                for row in &table.rows {
+                    push_i32(&mut out, row.chance);
+                    for id in &row.ids {
+                        out.extend_from_slice(&id.to_bytes());
+                    }
+                }
+            }
+        }
+
+        if sections.random_items {
+            push_i32(&mut out, len(&self.random_items));
+            for table in &self.random_items {
+                push_i32(&mut out, table.number);
+                push_cstr(&mut out, &table.name);
+                push_i32(&mut out, len(&table.sets));
+                for set in &table.sets {
+                    push_i32(&mut out, len(&set.items));
+                    for item in &set.items {
+                        push_i32(&mut out, item.chance);
+                        out.extend_from_slice(&item.id.to_bytes());
+                    }
+                }
+            }
+        }
+
+        out.extend_from_slice(&self.trailing);
+        out
+    }
+}
+
+/// Reads a count word.
+///
+/// A negative count is refused rather than clamped to zero: it means the cursor is
+/// not where this build thinks it is, so what follows is not the structure it
+/// expects. Refusing lets the caller keep those bytes verbatim instead of writing
+/// a normalised — and wrong — file.
+fn read_count(cursor: &mut Cursor<'_>, what: &'static str) -> Result<i32> {
+    let count = cursor.i32()?;
+    if count < 0 {
+        return Err(Error::from(ParseError::Validation {
+            check: "non-negative count",
+            detail: format!("the {what} section starts with a count of {count}"),
+        }));
+    }
+    Ok(count)
+}
+
+/// `len` as the `i32` the format uses for count words.
+fn len<T>(list: &[T]) -> i32 {
+    i32::try_from(list.len()).unwrap_or(i32::MAX)
+}
+
+fn push_i32(out: &mut Vec<u8>, v: i32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn push_f32(out: &mut Vec<u8>, v: f32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Writes a C string: the bytes, then the terminator.
+///
+/// The reader decodes these lossily, so a file whose strings were **not** UTF-8
+/// does not round-trip byte for byte. That is not guessed at here: the caller's
+/// self-check compares the result with the original and falls back to storing the
+/// member as binary when they differ.
+fn push_cstr(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(s.as_bytes());
+    out.push(0);
 }
 
 fn read_players(cursor: &mut Cursor<'_>, format_version: i32) -> Result<Vec<Player>> {
-    let count = cursor.i32()?;
+    let count = read_count(cursor, "player")?;
     let mut out = Vec::with_capacity(count.clamp(0, 1024) as usize);
-    for _ in 0..count.max(0) {
+    for _ in 0..count {
         let slot = cursor.i32()?;
         let player_type = cursor.i32()?;
         let race = cursor.i32()?;
-        let fixed_start_position = cursor.i32()? != 0;
+        let fixed_start_position = cursor.i32()?;
         let name = cursor.cstr()?;
         let start_x = cursor.f32()?;
         let start_y = cursor.f32()?;
@@ -855,9 +1252,9 @@ fn read_players(cursor: &mut Cursor<'_>, format_version: i32) -> Result<Vec<Play
 }
 
 fn read_forces(cursor: &mut Cursor<'_>) -> Result<Vec<Force>> {
-    let count = cursor.i32()?;
+    let count = read_count(cursor, "force")?;
     let mut out = Vec::with_capacity(count.clamp(0, 1024) as usize);
-    for _ in 0..count.max(0) {
+    for _ in 0..count {
         let flags = cursor.u32()?;
         let players = cursor.u32()?;
         let name = cursor.cstr()?;
@@ -871,9 +1268,9 @@ fn read_forces(cursor: &mut Cursor<'_>) -> Result<Vec<Force>> {
 }
 
 fn read_upgrades(cursor: &mut Cursor<'_>) -> Result<Vec<Upgrade>> {
-    let count = cursor.i32()?;
+    let count = read_count(cursor, "upgrade")?;
     let mut out = Vec::with_capacity(count.clamp(0, 4096) as usize);
-    for _ in 0..count.max(0) {
+    for _ in 0..count {
         let players = cursor.u32()?;
         let id = cursor.fourcc()?;
         let level = cursor.i32()?;
@@ -889,18 +1286,18 @@ fn read_upgrades(cursor: &mut Cursor<'_>) -> Result<Vec<Upgrade>> {
 }
 
 fn read_random_units(cursor: &mut Cursor<'_>) -> Result<Vec<RandomUnitTable>> {
-    let count = cursor.i32()?;
+    let count = read_count(cursor, "random unit")?;
     let mut out = Vec::with_capacity(count.clamp(0, 1024) as usize);
-    for _ in 0..count.max(0) {
+    for _ in 0..count {
         let group = cursor.i32()?;
         let name = cursor.cstr()?;
-        let columns = cursor.i32()?.clamp(0, 1024) as usize;
+        let columns = read_count(cursor, "random unit column")?.clamp(0, 1024) as usize;
         let column_types = cursor
             .u32s(columns)?
             .into_iter()
             .map(|v| v as i32)
             .collect();
-        let rows = cursor.i32()?.clamp(0, 65536) as usize;
+        let rows = read_count(cursor, "random unit row")?.clamp(0, 65536) as usize;
         let mut row_list = Vec::with_capacity(rows);
         for _ in 0..rows {
             let chance = cursor.i32()?;
@@ -921,15 +1318,15 @@ fn read_random_units(cursor: &mut Cursor<'_>) -> Result<Vec<RandomUnitTable>> {
 }
 
 fn read_random_items(cursor: &mut Cursor<'_>) -> Result<Vec<RandomItemTable>> {
-    let count = cursor.i32()?;
+    let count = read_count(cursor, "random item")?;
     let mut out = Vec::with_capacity(count.clamp(0, 1024) as usize);
-    for _ in 0..count.max(0) {
+    for _ in 0..count {
         let number = cursor.i32()?;
         let name = cursor.cstr()?;
-        let sets = cursor.i32()?.clamp(0, 65536) as usize;
+        let sets = read_count(cursor, "random item set")?.clamp(0, 65536) as usize;
         let mut set_list = Vec::with_capacity(sets);
         for _ in 0..sets {
-            let items = cursor.i32()?.clamp(0, 65536) as usize;
+            let items = read_count(cursor, "random item")?.clamp(0, 65536) as usize;
             let mut item_list = Vec::with_capacity(items);
             for _ in 0..items {
                 let chance = cursor.i32()?;
@@ -950,6 +1347,33 @@ fn read_random_items(cursor: &mut Cursor<'_>) -> Result<Vec<RandomItemTable>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_minimal_file_round_trips_byte_for_byte() {
+        let bytes = minimal_v25();
+        let parsed = MapInfo::parse(&bytes).unwrap();
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn a_tail_that_cannot_be_parsed_is_reported_and_kept() {
+        // `minimal_v25` carries no trailing sections at all, so four extra bytes
+        // look like a player count: the section read fails. Reporting that is not
+        // enough — the bytes have to survive the round trip, or a file this build
+        // only half understands would be quietly shortened.
+        let mut bytes = minimal_v25();
+        bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let parsed = MapInfo::parse(&bytes).unwrap();
+        assert!(
+            parsed.diagnostics.warning_count() > 0,
+            "a tail that cannot be parsed has to be reported"
+        );
+        assert_eq!(
+            parsed.to_bytes(),
+            bytes,
+            "an unparsable tail is kept, not dropped"
+        );
+    }
 
     /// Builds a minimal version 25 `.w3i` with no trailing sections.
     fn minimal_v25() -> Vec<u8> {

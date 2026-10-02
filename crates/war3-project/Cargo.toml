@@ -1,21 +1,14 @@
 [package]
-name = "war3-cli"
-description = "CLI umbrella crate providing the `war3` binary. Depends on every other crate; none depends on it."
+name = "war3-project"
+description = "Source project (extract/build): each archive member becomes text, decoded binary, or a verbatim block."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "war3"
-path = "src/main.rs"
-
 [dependencies]
 war3-core.workspace = true
 war3-archive.workspace = true
 war3-map.workspace = true
-war3-terrain.workspace = true
-war3-meta.workspace = true
 war3-object.workspace = true
-war3-project.workspace = true

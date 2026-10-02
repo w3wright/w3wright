@@ -30,9 +30,10 @@ missing is the source-project direction.
 | `war3-map` | done | `.w3i` (versions 0–33), `.wts`, `.imp`, `war3map.doo`, `war3mapUnits.doo`, the map composition model |
 | `war3-terrain` | done | `.w3e` in both the v11 and v12 layouts, plus a SYLK reader |
 | `war3-meta` | done | object field metadata read from the game's `*MetaData.slk`, `TriggerData.txt` trigger definitions, the editor-data type registry |
-| `war3-object` | done | object data (`.w3u` and friends): inheritance, field typing, `TRIGSTR_` resolution |
+| `war3-object` | done | object data (`.w3u` and friends): inheritance, field typing, `TRIGSTR_` resolution, and writing back — **137 of 137 members over 7 kinds byte-identical** on a real corpus (`cargo run --example objects_roundtrip -p war3-object -- <maps>`) |
+| `war3-project` | partial | source project: `war3 map extract` / `war3 validate` / `war3 build`. `war3map.w3i`, **the seven object files and `war3map.doo`** are text (edit a unit's field, a doodad's position or the map description and the game sees it); every other member is decoded binary or a verbatim block, and a member is only textified once its text form is proved to reproduce it byte for byte |
 | `war3-cli` | done | the `war3` binary |
-| `.w3x` round trip | partial | `war3 map rebuild` rewrites an archive member by member; the **source-project** direction (`extract` / `build`) is Phase 2 |
+| `.w3x` round trip | done for member content | `war3 map rebuild` rewrites an archive member by member; `extract` / `build` round-trip every member's content byte for byte |
 | `war3-wtg` | not started | trigger data (`.wtg` / `.wct`); prototype scope is a lossless round trip only |
 
 **255 tests pass (`cargo test --workspace`) and `cargo clippy --all-targets` is clean.** The dependency
@@ -48,6 +49,9 @@ decompressor, so the core builds for WASM and with a plain Rust toolchain.
 | `(4)LostTemple.w3m` | 16 members by name; `.w3i` v18, `.w3e` v11 (161x161 tile points), `war3map.j` 72697 bytes of JASS, **5317 doodads**; its `war3mapUnits.doo` is **v7/sub9 and still unparsed** — reported with an offset, never guessed |
 | `ydwe-sample-1.19.w3x` | `.w3i` v25, `.w3e` v11, `.w3u`, **125 placed units**, and a non-ASCII map name (`YDWE的UI演示`) via the string table |
 | `war3 map rebuild` | `(4)LostTemple.w3m` → **16 of 16 members byte-identical** (238.5 KB from a 245.2 KB source); both rebuild modes (`--stored` too) load in the game client |
+| `.w3i` re-serialisation | **188 of 190 maps parse → serialise byte for byte** (`cargo run --example w3i_roundtrip -p war3-map -- <maps>`); the two that differ have an imploded `war3map.w3i` |
+| placement re-serialisation | `war3map.doo` **188 of 188 maps byte-identical** (735,618 doodads) and `war3mapUnits.doo` **175 of 175** (26,826 units): `cargo run --release --example doodads_roundtrip -p war3-map -- <maps>` |
+| source-project round trip | the whole `extract → build` path over every map on this machine, with the member counts and every refusal printed: `cargo run --release --example project_regression -p war3-project -- <maps>` |
 | `war3 meta check D:\Warcraft3` | 7 field-metadata tables (267 unit fields, 747 ability fields, …) and 164 trigger types / 1389 actions |
 
 Extraction is byte-identical to an independent implementation of the format for
@@ -59,6 +63,9 @@ reported as unsupported too. See
 [`examples/lost-temple/README.md`](examples/lost-temple/README.md).
 An imploded member is not lost on a rebuild: it is copied across verbatim, and
 `TRIGSTR_` references that need it stay unresolved and are diagnosed.
+Measured on the local 193-map corpus: **5 maps cannot be enumerated at all
+because their `(listfile)` is imploded**, and 13 more because it is absent or
+reduced (see Q20 in the `docs/` design set).
 
 
 ---
@@ -90,6 +97,11 @@ cargo build --release
 # Rewrite the archive with this workspace's writer, and verify the result.
 ./target/release/war3 map rebuild "<map>" out.w3x
 
+# Source project: a map becomes a directory, and comes back.
+./target/release/war3 map extract "<map>" my-project/
+./target/release/war3 validate my-project/          # read-only: every problem at once, exit 2 if any
+./target/release/war3 build my-project/ --out rebuilt.w3x
+
 # Check whether metadata and trigger definitions can be found locally.
 ./target/release/war3 meta check "D:\Warcraft3"
 ```
@@ -114,6 +126,7 @@ w3wright/
 │   ├── war3-terrain/          # .w3e v11 and v12, plus SYLK
 │   ├── war3-meta/             # object field metadata and trigger definitions
 │   ├── war3-object/           # object data (.w3u and friends)
+│   ├── war3-project/          # source project: extract / build
 │   └── war3-cli/              # umbrella crate providing the war3 binary
 ├── examples/                  # test map samples (binaries are gitignored)
 └── README.md, README_CN.md
@@ -124,6 +137,7 @@ w3wright/
 ```text
 war3-cli  <- umbrella crate, the only one producing a binary
   ├── war3-map     -> war3-archive, war3-terrain, war3-core
+  ├── war3-project -> war3-archive, war3-core
   ├── war3-object  -> war3-meta, war3-core
   ├── war3-meta    -> war3-terrain, war3-core
   ├── war3-archive -> war3-core

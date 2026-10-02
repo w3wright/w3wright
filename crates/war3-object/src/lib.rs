@@ -33,7 +33,7 @@
 pub mod object;
 
 pub use object::{
-    codes_agree, FieldType, FieldValue, Modification, Object, ObjectFile, ObjectTable,
-    SUPPORTED_VERSIONS,
+    codes_agree, is_levelled, FieldType, FieldValue, Levelled, Modification, Object, ObjectFile,
+    ObjectTable, SUPPORTED_VERSIONS,
 };
 pub use war3_meta::ObjectKind;
