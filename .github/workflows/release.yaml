@@ -154,27 +154,25 @@ jobs:
         run: cargo build --workspace --exclude war3-cli --target wasm32-unknown-unknown --locked
 
   # ---------------------------------------------------------------------------
-  # crates.io. The order below is the dependency order and is not negotiable:
-  # cargo publish resolves each dependency against the live registry, so a
-  # crate cannot be published before everything it depends on.
+  # crates.io. `harbor` computes this order from the workspace's own dependency
+  # graph, because `cargo publish` resolves each dependency against the live
+  # registry and therefore cannot publish a crate before everything it depends on.
   #
-  # The graph is not a tree -- war3-map is reached from both war3-archive and
-  # war3-terrain -- so it is listed here as direct dependencies instead, which is
-  # exactly what the order has to respect:
+  # ⚠️ That order is deliberately NOT written down here any more. It used to be a
+  # string in a shell loop, and it was wrong -- `war3-object` was listed before
+  # `war3-map`, which it depends on -- so the release stopped on the impossible
+  # dependency and retried it for ten minutes before blaming the registry index.
+  # An order with one correct answer should be computed, not maintained. `harbor`
+  # also validates the graph before uploading anything: a cycle, a published crate
+  # that depends on an excluded one, or a member pattern matching nothing all fail
+  # immediately instead of half way through a release.
   #
-  #   war3-core      (nothing)
-  #   war3-archive   core
-  #   war3-terrain   core
-  #   war3-meta      core, terrain
-  #   war3-map       core, archive, terrain
-  #   war3-object    core, archive, map, meta
-  #   war3-project   core, archive, map, object
-  #   war3-game      core, archive, meta
-  #
-  # war3-cli is absent on purpose: it is a binary and ships as a GitHub Release
-  # artifact, which is what map authors want, rather than through `cargo install`.
-  # It is still the reason war3-game has to be published at all -- the binary
-  # depends on it with the `mpq` feature.
+  # Which crates ship is likewise a property of each crate (`publish = false` in
+  # its manifest), not a list kept here. `war3-cli` says so itself: it is a binary,
+  # and it is kept out so the binary reaches map authors as a GitHub Release
+  # artifact instead of through `cargo install`. That is a choice about how this
+  # release is delivered, not a statement that the crate cannot be published --
+  # it is publishable, and becomes part of this list the moment that line goes.
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to crates.io
@@ -203,167 +201,44 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verify the tag matches the workspace version
-        if: github.event_name == 'push'
-        run: |
-          set -euo pipefail
-          manifest_version=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[0].version')
-          tag_version="${GITHUB_REF_NAME#v}"
-          echo "manifest: $manifest_version"
-          echo "tag:      $tag_version"
-          if [ "$manifest_version" != "$tag_version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $manifest_version"
-            echo "Bump [workspace.package] version, or retag."
-            exit 1
-          fi
+      # The release tool. It is the only thing that decides anything now: what publishes,
+      # in what order, and what to do when the registry answers badly. Everything this job
+      # used to work out in shell is one `harbor plan` inside it.
+      #
+      # To run against an unpublished harbor, replace this with
+      # `cargo install --path ../harbor --locked` and check harbor out beside this repo.
+      - name: Install the release tool
+        run: cargo install harbor --locked
 
-      # The token comes from the environment, never from a command line, so it
-      # cannot leak into a log through `cargo` echoing its arguments.
-      - name: Check the token is present
+      # `check` is three guards that used to be shell here, plus the one thing shell could
+      # not do well: it tells "the secret is missing" apart from "the secret is set but
+      # empty", which is the failure that looks like a permissions problem instead.
+      #
+      # The token is passed through the environment and never as an argument, so it cannot
+      # reach a log by way of cargo echoing a command line.
+      - name: Check the release before starting it
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "::error::the CARGO_REGISTRY_TOKEN secret is empty"
-            echo "Add it under Settings -> Secrets and variables -> Actions,"
-            echo "named exactly CARGO_REGISTRY_TOKEN."
-            exit 1
+          if [ "${{ github.event_name }}" = "push" ]; then
+            cargo harbor --root . check "$GITHUB_REF_NAME"
+          else
+            cargo harbor --root . check
           fi
-          echo "token present (${#CARGO_REGISTRY_TOKEN} characters, not printed)"
 
+      # The order is computed from the workspace's own dependency graph, so there is no
+      # string here to keep in step with it -- and no way to write `war3-object` before
+      # `war3-map`, which is the mistake this job used to be able to make silently.
+      #
+      # A crate the registry already holds is not an error (a re-run finishing a partial
+      # release is the normal case); a dependency the index has not indexed yet is waited
+      # for; anything else stops the release at once, because retrying a bad token or a
+      # compile error only spends ten minutes arriving at the same failure.
       - name: Publish in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # One metadata call, reused for every lookup.
-          cargo metadata --no-deps --format-version 1 > /tmp/meta.json
-
-          version_of() {
-            jq -r --arg name "$1" '.packages[] | select(.name == $name) | .version' /tmp/meta.json
-          }
-
-          # Dependency order, and it is not negotiable: cargo publish resolves
-          # each dependency against the live registry, so a crate cannot go out
-          # before everything it depends on. war3-cli is absent on purpose -- it
-          # is a binary and ships as a GitHub Release artifact, which is what
-          # map authors want, rather than through `cargo install`.
-          #
-          # ⚠️ war3-object comes AFTER war3-map, not before: war3-object depends on
-          # war3-map. An earlier revision had these two the other way round, which
-          # is why a release stopped at war3-object and retried 60 times waiting for
-          # a `war3-map 0.0.5` that could never arrive. Ordering is a property of the
-          # dependency graph, so check it there rather than by eye; /tmp/meta.json
-          # (written above) has the edges.
-          order="war3-core war3-archive war3-terrain war3-meta war3-map war3-object war3-project war3-game"
-
-          # Prove the order respects the graph before publishing anything. Getting
-          # this wrong is not loud: the loop waits the full 60 retries on a
-          # dependency that can never appear, so the release burns ten minutes and
-          # then fails with a message about indexing. Checking it here costs
-          # nothing and turns that into an immediate, explicit error.
-          #
-          # The edges come from the same `cargo metadata` used above, so this
-          # cannot agree with a stale copy of the graph. Dependencies outside the
-          # `war3-*` set are ignored: only these are published in order.
-          visited=""
-          for crate in $order; do
-            deps=$(jq -r --arg c "$crate" '
-              [ .packages[].name | select(startswith("war3-")) ] as $names
-              | .packages[] | select(.name == $c)
-              | [ .dependencies[].name | select(. as $d | $names | index($d)) ]
-              | join(" ")' /tmp/meta.json)
-
-            for dep in $deps; do
-              if [ "${visited} " != *" ${dep} "* ]; then
-                echo "::error::$crate depends on $dep, but \$order lists it later"
-                echo "Move $dep before $crate in \$order."
-                exit 1
-              fi
-            done
-            visited="${visited} ${crate}"
-          done
-
-          # And prove nothing was overlooked. A `war3-*` library that is missing
-          # from `$order` is never published, and the omission stays invisible
-          # until something downstream asks for a version that is not there --
-          # which is exactly how `war3-game` went unpublished while the binary
-          # that needs it shipped. `war3-cli` is the one deliberate exception.
-          for pkg in $(jq -r '.packages[].name | select(startswith("war3-"))' /tmp/meta.json); do
-            [ "$pkg" = "war3-cli" ] && continue
-            case " $order " in
-              *" $pkg "*) ;;
-              *)
-                echo "::error::$pkg is a library in this workspace but is not in \$order"
-                echo "Add it to \$order, or exclude it here on purpose."
-                exit 1
-                ;;
-            esac
-          done
-
-          # Publishing is attempted directly rather than gated behind a
-          # "is it already there?" probe, because every such probe available
-          # here lies:
-          #   - `cargo search` fuzzy-matches, so it reports unrelated and
-          #     not-yet-published crates as hits, which would skip every crate
-          #     and publish nothing while reporting success;
-          #   - `cargo info` resolves against the local workspace first and
-          #     returns 0 for a crate that was never published.
-          # The publish error itself is the only trustworthy signal, so it is
-          # what this loop branches on.
-          for crate in $order; do
-            version=$(version_of "$crate")
-            if [ -z "$version" ]; then
-              echo "::error::could not read the version of $crate from cargo metadata"
-              exit 1
-            fi
-            echo "::group::$crate $version"
-
-            # crates.io does not index an upload instantly, and cargo publish
-            # resolves dependencies against that index. Retrying on that exact
-            # error is what turns a timing problem into a wait instead of a
-            # failed release. The message looks like:
-            #   failed to select a version for the requirement `war3-core = "^0.0.2"`
-            #   candidate versions found which didn't match: 0.0.1
-            # which misleadingly points at the manifest rather than at timing.
-            attempt=0
-            max_attempts=60
-            while :; do
-              attempt=$((attempt + 1))
-              if output=$(cargo publish --locked -p "$crate" 2>&1); then
-                echo "$output"
-                echo "published $crate $version"
-                break
-              fi
-              echo "$output"
-
-              # A re-run after a partial release lands here. Not an error: the
-              # crate is already out and crates.io never allows a re-upload.
-              if grep -qi 'already uploaded\|already exists' <<<"$output"; then
-                echo "$crate $version is already on the registry, moving on"
-                break
-              fi
-
-              # Only index propagation is worth waiting for. Anything else is a
-              # real failure and should stop the release rather than burn ten
-              # minutes on retries.
-              if ! grep -qi 'failed to select a version' <<<"$output"; then
-                echo "::error::publishing $crate failed for a reason other than index propagation"
-                exit 1
-              fi
-              if [ "$attempt" -ge "$max_attempts" ]; then
-                echo "::error::$crate $version still cannot resolve its dependencies after $((max_attempts * 10))s"
-                exit 1
-              fi
-
-              echo "dependencies not indexed yet, retrying ($attempt/$max_attempts)"
-              sleep 10
-            done
-            echo "::endgroup::"
-          done
+        run: cargo harbor --root . publish
 
   # ---------------------------------------------------------------------------
   # The binary. This is the artifact most users actually want: they are map
