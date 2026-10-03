@@ -4,14 +4,14 @@ version = 3
 
 [[package]]
 name = "war3-archive"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "war3-core",
 ]
 
 [[package]]
 name = "war3-cli"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "war3-archive",
  "war3-core",
@@ -25,11 +25,11 @@ dependencies = [
 
 [[package]]
 name = "war3-core"
-version = "0.0.4"
+version = "0.0.5"
 
 [[package]]
 name = "war3-game"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "war3-archive",
  "war3-core",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "war3-map"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "war3-archive",
  "war3-core",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "war3-meta"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "war3-core",
  "war3-terrain",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "war3-object"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "war3-archive",
  "war3-core",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "war3-project"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "war3-archive",
  "war3-core",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "war3-terrain"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "war3-core",
 ]
