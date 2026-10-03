@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/w3wright/w3wright"
@@ -34,14 +34,14 @@ rust-version = "1.75"
 #     $env:CARGO_TARGET_DIR = "$env:TEMP\w3-fresh"; cargo package --workspace
 #
 # CI never sees either trap: a fresh checkout has no cache and no stale tarball.
-war3-core = { path = "crates/war3-core", version = "0.0.5" }
-war3-archive = { path = "crates/war3-archive", version = "0.0.5" }
-war3-map = { path = "crates/war3-map", version = "0.0.5" }
-war3-terrain = { path = "crates/war3-terrain", version = "0.0.5" }
-war3-meta = { path = "crates/war3-meta", version = "0.0.5" }
-war3-object = { path = "crates/war3-object", version = "0.0.5" }
-war3-project = { path = "crates/war3-project", version = "0.0.5" }
-war3-game = { path = "crates/war3-game", version = "0.0.5" }
+war3-core = { path = "crates/war3-core", version = "0.0.6" }
+war3-archive = { path = "crates/war3-archive", version = "0.0.6" }
+war3-map = { path = "crates/war3-map", version = "0.0.6" }
+war3-terrain = { path = "crates/war3-terrain", version = "0.0.6" }
+war3-meta = { path = "crates/war3-meta", version = "0.0.6" }
+war3-object = { path = "crates/war3-object", version = "0.0.6" }
+war3-project = { path = "crates/war3-project", version = "0.0.6" }
+war3-game = { path = "crates/war3-game", version = "0.0.6" }
 
 [profile.release]
 lto = "thin"
