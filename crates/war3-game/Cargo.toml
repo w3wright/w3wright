@@ -15,6 +15,6 @@ default = []
 mpq = ["dep:war3-archive"]
 
 [dependencies]
-war3-core = { path = "../war3-core", version = "0.0.3" }
-war3-meta = { path = "../war3-meta", version = "0.0.3" }
-war3-archive = { path = "../war3-archive", version = "0.0.3", optional = true }
+war3-core = { path = "../war3-core", version = "0.0.4" }
+war3-meta = { path = "../war3-meta", version = "0.0.4" }
+war3-archive = { path = "../war3-archive", version = "0.0.4", optional = true }
