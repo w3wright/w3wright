@@ -2,7 +2,6 @@
 
 #![forbid(unsafe_code)]
 
-mod assets;
 mod cli;
 mod commands;
 // Not named `fmt`, which would collide with `std::fmt` at every `use` site.

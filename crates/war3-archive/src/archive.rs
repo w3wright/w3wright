@@ -107,6 +107,47 @@ pub enum MpqError {
     Io(std::io::Error),
 }
 
+impl MpqError {
+    /// Whether this is "the operation does not apply to this archive" rather than "something
+    /// went wrong".
+    ///
+    /// # Why the distinction is part of the error type
+    ///
+    /// A caller has to tell the two apart to choose its words: a member that cannot be relocated is
+    /// a limitation of *this file*, and a reader can act on it — patch the map another way, or just
+    /// leave it alone — while a truncated table is a fault with no action attached.
+    ///
+    /// ⚠️ The editor used to make this decision by **string prefix**: it looked for a marker it had
+    /// glued onto the message itself, in `commands.rs`. That is the same class of mistake as reading
+    /// a message with `strip_prefix`: the fact was in the type all along
+    /// ([`MpqError::MemberNotWritable`]) and was flattened to text, so every consumer had to parse
+    /// it back out.
+    ///
+    /// The match is exhaustive rather than a list of the "not applicable" variants, so that a new
+    /// variant has to be classified deliberately instead of defaulting to "a fault".
+    #[must_use]
+    pub const fn is_not_applicable(&self) -> bool {
+        match self {
+            // The member is fine; the *operation* cannot be performed on it.
+            Self::MemberNotWritable { .. } => true,
+            // Everything else is a malformed file, a bad argument, or the environment.
+            Self::Eof
+            | Self::NoArchiveHeader
+            | Self::TablesOutOfRange { .. }
+            | Self::HashTableSizeNotPowerOfTwo(_)
+            | Self::BadListfileEncoding
+            | Self::SectorTableOutOfRange
+            | Self::SizeMismatch { .. }
+            | Self::NotFound(_)
+            | Self::BadPrefixLength(_)
+            | Self::TooManyMembers(_)
+            | Self::Codec(_)
+            | Self::Parse(_)
+            | Self::Io(_) => false,
+        }
+    }
+}
+
 impl fmt::Display for MpqError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

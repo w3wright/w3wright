@@ -1,0 +1,20 @@
+[package]
+name = "war3-game"
+description = "The user's Warcraft III installation: where its data lives, and the object names in it, read at runtime. Runs on any AssetSource; reading the game's MPQ archives is behind the `mpq` feature."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+
+# Reading the game's own MPQ archives. Off by default so that a build which is handed its assets
+# some other way — a browser handle, a memory map, a test — does not pull in the container crate.
+mpq = ["dep:war3-archive"]
+
+[dependencies]
+war3-core = { path = "../war3-core", version = "0.0.3" }
+war3-meta = { path = "../war3-meta", version = "0.0.3" }
+war3-archive = { path = "../war3-archive", version = "0.0.3", optional = true }

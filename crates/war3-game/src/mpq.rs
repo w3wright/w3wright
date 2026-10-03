@@ -1,19 +1,23 @@
-//! Asset access backed by the game's own MPQ archives.
+//! The game's own MPQ archives as an [`AssetSource`].
 //!
-//! The core crate cannot do this itself: it must not depend on the MPQ reader,
-//! so wrapping an archive in an asset source is the caller's job. This is that
-//! caller.
+//! # Why this lives in the core rather than in the command line
 //!
-//! # Why it is needed
+//! It was written in `crates/war3-cli/src/assets.rs`, and grew into something two callers need:
+//! the command line and the editor both have to answer "what is `hfoo` called", and the answer
+//! depends entirely on which archive wins. Two copies of that order is exactly the kind of
+//! divergence this workspace exists to prevent — the load order decides whether the reader sees
+//! RoC-era metadata or the patched one, and the difference is 117 rows against 267.
 //!
-//! Most of the game's metadata and trigger definitions — `UI\TriggerData.txt`,
-//! `Units\UnitMetaData.slk`, `UI\WorldEditStrings.txt` and so on — are **packed
-//! inside `war3.mpq`, `War3x.mpq` and friends** rather than present as files on
-//! disk. Scanning a directory tree alone therefore reports them missing on almost
-//! every installation, which reads as "the game is not installed" when the real
-//! situation is "its data has not been unpacked".
+//! # The order is the game's, and it is load-bearing
 //!
-//! Archives are queried in a fixed order and the first hit wins.
+//! | File | `war3.mpq` | `War3x.mpq` | `War3Patch.mpq` |
+//! | --- | --- | --- | --- |
+//! | `Units\UnitMetaData.slk` | 117 rows | 248 rows | **267 rows** |
+//! | `Units\AbilityMetaData.slk` | absent | 630 rows | **748 rows** |
+//! | `UI\UnitEditorData.txt` | 12 sections | 31 sections | **36 sections** |
+//!
+//! Reversing it does not fail. It quietly serves 2003-era data, and the symptom is a field or an
+//! object that "cannot be found" on a map that has it.
 
 use std::path::{Path, PathBuf};
 
@@ -23,23 +27,10 @@ use war3_core::{AssetSource, FileAssetSource};
 
 /// Archives in the order the game opens them: lowest priority first.
 ///
-/// **The last archive opened wins.** That is not a detail — every metadata file
-/// this tool reads exists in more than one of these archives with *different*
-/// contents, so the order decides what the tool sees:
-///
-/// | File | `war3.mpq` | `War3x.mpq` | `War3Patch.mpq` |
-/// | --- | --- | --- | --- |
-/// | `Units\UnitMetaData.slk` | 117 rows | 248 rows | 267 rows |
-/// | `Units\AbilityMetaData.slk` | absent | 630 rows | 748 rows |
-/// | `Doodads\DoodadMetaData.slk` | absent | 62 rows | 35 rows |
-/// | `UI\UnitEditorData.txt` | 12 sections | 31 sections | 36 sections |
-///
-/// The three `UnitMetaData.slk` sets are nested, and the doodad table is not
-/// smaller by accident: the patch version replaces ten explicit level rows
-/// (`dvr1`…`dvr0`, fields `vertR01`…`vertB10`) with three rows carrying
-/// `repeat=10`. Reading the base archive instead therefore misses every
-/// expansion field and every level beyond the first.
-const ARCHIVE_LOAD_ORDER: &[&str] = &[
+/// **The last archive opened wins.** `War3xLocal.mpq` sits between the expansion and the patch
+/// because it holds the localised text — the Chinese unit names on this machine — and the patch
+/// must still be able to override it.
+pub const ARCHIVE_LOAD_ORDER: &[&str] = &[
     "war3.mpq",
     "War3x.mpq",
     "War3xLocal.mpq",
@@ -47,11 +38,11 @@ const ARCHIVE_LOAD_ORDER: &[&str] = &[
     "war3local.mpq",
 ];
 
-/// Loose files over archives, or the other way round.
+/// Loose files under archives, or the other way round.
 ///
-/// A dedicated type so that the ordering is defined in exactly one place:
-/// reversing it would not fail, it would quietly read a different copy. The
-/// archives come first because a patch archive overrides the loose tree.
+/// A dedicated type so the ordering is defined in exactly one place: reversing it would not fail,
+/// it would quietly read a different copy. The archives win because a patch archive overrides an
+/// unpacked tree.
 #[derive(Debug)]
 pub struct LayeredSource<'a> {
     first: &'a MpqAssetSource,
@@ -75,8 +66,7 @@ impl AssetSource for LayeredSource<'_> {
 /// A chain of MPQ archives queried in priority order.
 #[derive(Debug)]
 pub struct MpqAssetSource {
-    /// Highest priority first, so a lookup is a forward scan with first hit
-    /// winning.
+    /// Highest priority first, so a lookup is a forward scan with first hit winning.
     archives: Vec<Archive>,
     /// Archives that could not be opened, with the reason.
     failed: Vec<(PathBuf, String)>,
@@ -85,8 +75,8 @@ pub struct MpqAssetSource {
 impl MpqAssetSource {
     /// Opens every archive it can find under `root`.
     ///
-    /// An archive that will not open is recorded and skipped: one damaged
-    /// localisation pack should not take the whole chain down.
+    /// An archive that will not open is recorded and skipped: one damaged localisation pack should
+    /// not take the whole chain down.
     #[must_use]
     pub fn open(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
@@ -121,12 +111,11 @@ impl MpqAssetSource {
         &self.failed
     }
 
-    /// Per archive: its path, how many members it has names for, and how many
-    /// block table entries are in use.
+    /// Per archive: its path, how many members it has names for, and how many block table entries
+    /// are in use.
     ///
-    /// The two counts differing is normal and informative: the format does not
-    /// store names, so members that no enumeration source mentions stay
-    /// anonymous.
+    /// The two counts differing is normal and informative: the format does not store names, so
+    /// members that no enumeration source mentions stay anonymous.
     #[must_use]
     pub fn name_counts(&self) -> Vec<(PathBuf, usize, usize)> {
         self.archives
@@ -144,8 +133,8 @@ impl MpqAssetSource {
 
 impl AssetSource for MpqAssetSource {
     fn get(&self, path: &str) -> Option<Vec<u8>> {
-        // Normalising first is faster when the name is already in an index, and
-        // harmless when it is not: the archive hashes the name itself.
+        // Normalising first is faster when the name is already in an index, and harmless when it
+        // is not: the archive hashes the name itself.
         let wanted = normalize_asset_path(path);
         // Highest priority first: the first archive holding the name answers.
         for archive in &self.archives {
@@ -154,6 +143,67 @@ impl AssetSource for MpqAssetSource {
             }
         }
         None
+    }
+}
+
+/// The whole game installation as one asset source: archives over loose files.
+///
+/// # Why a type and not a function
+///
+/// The three pieces have different lifetimes and the layered source borrows two of them, so a
+/// caller that wants the chain has to hold all three. Handing back one owning value keeps that
+/// from being something every caller has to get right.
+///
+/// # ⚠️ Opening this is the expensive part
+///
+/// `MpqAssetSource::open` reads each archive's hash and block table. On this machine that is four
+/// archives and 17,660 enumerable names, and it is why a caller that resolves names repeatedly
+/// should build one of these **once** and keep it, rather than per lookup.
+#[derive(Debug)]
+pub struct GameAssets {
+    /// The archives, highest priority first.
+    archives: MpqAssetSource,
+    /// The unpacked tree, which the archives override.
+    loose: FileAssetSource,
+}
+
+impl GameAssets {
+    /// Opens a game installation directory.
+    ///
+    /// A directory that is not one — no archives, no loose files — is not an error here. It
+    /// produces a source whose every lookup misses, so a caller with no game installed gets IDs
+    /// rather than a failure, which is the same degradation the rest of the core follows.
+    #[must_use]
+    pub fn open(root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref();
+        Self {
+            archives: MpqAssetSource::open(root),
+            loose: FileAssetSource::new(root),
+        }
+    }
+
+    /// The archives, for a report that wants to name them.
+    #[must_use]
+    pub const fn archives(&self) -> &MpqAssetSource {
+        &self.archives
+    }
+
+    /// The unpacked tree.
+    #[must_use]
+    pub const fn loose(&self) -> &FileAssetSource {
+        &self.loose
+    }
+
+    /// A view implementing [`AssetSource`].
+    #[must_use]
+    pub const fn layered(&self) -> LayeredSource<'_> {
+        LayeredSource::new(&self.archives, &self.loose)
+    }
+}
+
+impl AssetSource for GameAssets {
+    fn get(&self, path: &str) -> Option<Vec<u8>> {
+        self.archives.get(path).or_else(|| self.loose.get(path))
     }
 }
 
@@ -172,9 +222,8 @@ mod tests {
 
     #[test]
     fn the_load_order_puts_patches_last_and_the_base_first() {
-        // The constant is the game's load order, so the base archive comes
-        // first and everything opened later overrides it. Reversing this list
-        // would silently serve 2003-era metadata.
+        // The constant is the game's load order, so the base archive comes first and everything
+        // opened later overrides it. Reversing this list would silently serve 2003-era metadata.
         assert_eq!(ARCHIVE_LOAD_ORDER[0], "war3.mpq");
         let patch = ARCHIVE_LOAD_ORDER
             .iter()
@@ -188,12 +237,22 @@ mod tests {
             patch > expansion,
             "the patch archive must be opened after the expansion so it wins"
         );
+        // And the localisation must sit between them: it carries the translated text, and the
+        // patch still has to be able to override it.
+        let local = ARCHIVE_LOAD_ORDER
+            .iter()
+            .position(|n| *n == "War3xLocal.mpq")
+            .expect("the localisation archive is part of the chain");
+        assert!(
+            expansion < local && local < patch,
+            "localisation sits in the middle"
+        );
     }
 
-    /// A directory of two archives holding the same name, removed on drop.
+    /// A directory of archives, removed on drop.
     ///
-    /// Deliberately dependency-free: the workspace has no temporary-directory
-    /// crate, and one small guard is cheaper than adding one.
+    /// Deliberately dependency-free: the workspace has no temporary-directory crate, and one small
+    /// guard is cheaper than adding one.
     struct TempTree(PathBuf);
 
     impl TempTree {
@@ -260,5 +319,19 @@ mod tests {
 
         let src = MpqAssetSource::open(tree.path());
         assert_eq!(src.get("ui/uniteditordata.txt").unwrap(), b"[attackBits]");
+    }
+
+    /// The owning source resolves through the same chain, so a caller that wants one value does
+    /// not have to know about the layering.
+    #[test]
+    fn the_owning_source_reaches_both_layers() {
+        let tree = TempTree::new("owning");
+        tree.archive("war3.mpq", "from\\archive.txt", b"archive");
+        std::fs::write(tree.path().join("from-loose.txt"), b"loose").unwrap();
+
+        let assets = GameAssets::open(tree.path());
+        assert_eq!(assets.get("from\\archive.txt").unwrap(), b"archive");
+        assert_eq!(assets.get("from-loose.txt").unwrap(), b"loose");
+        assert_eq!(assets.archives().archive_count(), 1);
     }
 }

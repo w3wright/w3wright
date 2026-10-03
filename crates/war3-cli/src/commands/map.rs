@@ -110,10 +110,18 @@ fn info(args: &[String]) -> Result<ExitCode> {
     println!("{}", "=".repeat(60));
 
     outfmt::section("general");
-    outfmt::field("name", &map.metadata.name, 20);
-    outfmt::field("author", &map.metadata.author, 20);
+    // The markup codes are decoded, not printed. A map name is usually
+    // `|cffffff00Name|r`, and eight hex digits and a reset in the middle of a column is
+    // noise the reader has to skip; `war3_map::plain` is the same decoder the studio's
+    // panels use, so the two views cannot disagree about what the name is.
+    outfmt::field("name", war3_map::plain(&map.metadata.name), 20);
+    outfmt::field("author", war3_map::plain(&map.metadata.author), 20);
     if !map.metadata.description.is_empty() {
-        outfmt::field("description", &map.metadata.description, 20);
+        outfmt::field(
+            "description",
+            war3_map::plain(&map.metadata.description),
+            20,
+        );
     }
     outfmt::field(
         "recommended",
@@ -908,10 +916,10 @@ fn objects(args: &[String]) -> Result<ExitCode> {
 
     let archive = war3_archive::Archive::open(path)?;
     let metadata = game_dir.as_deref().map(|dir| {
-        let mpq = crate::assets::MpqAssetSource::open(dir);
-        let loose = war3_core::FileAssetSource::new(dir);
-        let layered = crate::assets::LayeredSource::new(&mpq, &loose);
-        war3_meta::MetaTableSet::load_from_assets(&layered)
+        // One value for the whole installation, so that the archive-over-loose order lives in one
+        // place (`war3-game`). A second copy here is how the two would come to disagree.
+        let assets = war3_game::GameAssets::open(dir);
+        war3_meta::MetaTableSet::load_from_assets(&assets)
     });
     // String-valued fields whose metadata marks them `stringExt` hold
     // `TRIGSTR_nnn` references, which only the map's own string table can

@@ -27,7 +27,21 @@
 //! builder.add_stored("war3map.w3i", w3i_bytes);
 //! builder.write("out.w3x")?;
 //! ```
+//!
+//! # Why a rebuild is previewed rather than just done
+//!
+//! [`ArchiveBuilder`] builds **from nothing**: it decides the hash table size, the member order,
+//! the compression and the encryption. It keeps every member's *content* but it rewrites the
+//! *archive*, so a rebuild of `(4)LostTemple.w3m` preserves all 16 members byte for byte and still
+//! turns a 245,236-byte file into a 244,201-byte one whose bytes differ from offset 520 onward —
+//! the hash table.
+//!
+//! That makes "would this change my file?" a question worth answering before writing anything, and
+//! [`RebuildPreview::of`] is the answer. It is one implementation on purpose: the command line's
+//! `war3 map rebuild` and the editor's save button must not describe the same operation
+//! differently. See `docs/decisions/ADR-0028`.
 
+use std::fmt;
 use std::path::Path;
 
 use crate::archive::{
@@ -423,6 +437,112 @@ fn hash_table_size(members: usize) -> u32 {
         .min(MAX_HASH_SIZE)
 }
 
+/// What rebuilding an archive would produce, without producing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuildPreview {
+    /// Size of the file the rebuild was planned from.
+    pub original_bytes: u64,
+    /// Size the rebuild would have.
+    pub rebuilt_bytes: u64,
+    /// How many members the rebuild would carry.
+    pub member_count: usize,
+    /// Offset of the first byte that differs, or `None` when the rebuild is byte identical.
+    ///
+    /// `Some` at the length of the shorter file is a real answer, not a rounding: two files that
+    /// agree up to the end of one of them and then stop are not identical.
+    pub first_difference: Option<u64>,
+}
+
+impl RebuildPreview {
+    /// Whether the rebuild would be byte for byte what is already on disk.
+    #[must_use]
+    pub const fn is_identical(&self) -> bool {
+        self.first_difference.is_none()
+    }
+
+    /// Plans a rebuild of an archive the caller has already read.
+    ///
+    /// `original` is the file's bytes, which the archive does not keep — it parses tables and
+    /// leaves the rest alone. The two must be the same file; passing one archive's bytes with
+    /// another's tables would produce a difference that means nothing.
+    ///
+    /// # Errors
+    ///
+    /// - Whatever reading a member's stored block reports.
+    /// - [`MpqError::MemberNotWritable`] when a member cannot be relocated — see
+    ///   [`MpqError::is_not_applicable`], which is how a caller tells that apart from a fault.
+    pub fn of(archive: &Archive, original: &[u8]) -> MpqResult<Self> {
+        // Rebuild every member verbatim, then compare. `add_raw` carries the stored block through
+        // unchanged, so any difference is one the *builder* introduced rather than one the caller
+        // asked for — which is the whole question being asked.
+        let mut builder = ArchiveBuilder::with_prefix(archive.prefix().to_vec())?;
+        let mut names = archive.file_names();
+        names.sort_unstable();
+        let mut member_count = 0usize;
+        for name in &names {
+            builder.add_raw(archive.raw_member(name)?)?;
+            member_count += 1;
+        }
+        let rebuilt = builder.to_bytes()?;
+
+        Ok(Self {
+            original_bytes: original.len() as u64,
+            rebuilt_bytes: rebuilt.len() as u64,
+            member_count,
+            first_difference: first_difference_of(original, &rebuilt),
+        })
+    }
+
+    /// Plans a rebuild of a file on disk.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, or as [`RebuildPreview::of`].
+    pub fn of_file(path: impl AsRef<Path>) -> MpqResult<Self> {
+        let path = path.as_ref();
+        let original = std::fs::read(path)?;
+        let archive = Archive::open(path)?;
+        Self::of(&archive, &original)
+    }
+
+    /// The sentence a reader needs, in one place so two callers cannot disagree.
+    #[must_use]
+    pub fn note(&self) -> String {
+        match self.first_difference {
+            None => {
+                "A rebuild of this map is byte identical, so saving would change only what you \
+                     edit."
+                    .to_string()
+            }
+            Some(at) => format!(
+                "A rebuild preserves every member's content but rewrites the archive: \
+                 {} becomes {}, and the first difference is at offset {at}. Saving would therefore \
+                 write a new file rather than patch this one.",
+                self.original_bytes, self.rebuilt_bytes,
+            ),
+        }
+    }
+}
+
+impl fmt::Display for RebuildPreview {
+    /// The note, so a caller that just wants to print this can.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.note())
+    }
+}
+
+/// The offset of the first difference between two byte strings, or `None` when equal.
+///
+/// A common prefix with different lengths still differs, at the shorter end.
+#[must_use]
+pub fn first_difference_of(a: &[u8], b: &[u8]) -> Option<u64> {
+    a.iter()
+        .zip(b.iter())
+        .position(|(x, y)| x != y)
+        .map(|i| i as u64)
+        .or_else(|| (a.len() != b.len()).then_some(a.len().min(b.len()) as u64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,6 +669,78 @@ mod tests {
         ));
     }
 
+    /// A rebuild of what this writer produced is byte identical, so the preview says so.
+    ///
+    /// This is the property the preview exists to report, and it is only true for an archive this
+    /// writer made: a real map's rebuild differs at the hash table. See the next test.
+    #[test]
+    fn a_preview_of_our_own_output_is_identical() {
+        let mut builder = ArchiveBuilder::new();
+        builder.add_stored("war3map.w3i", b"map info".to_vec());
+        builder.add_stored("war3map.wts", b"strings".to_vec());
+        let bytes = builder.to_bytes().unwrap();
+
+        let archive = Archive::from_bytes(bytes.clone()).unwrap();
+        let preview = RebuildPreview::of(&archive, &bytes).unwrap();
+
+        assert_eq!(preview.first_difference, None);
+        assert!(preview.is_identical());
+        assert_eq!(preview.original_bytes, bytes.len() as u64);
+        assert_eq!(preview.rebuilt_bytes, preview.original_bytes);
+        assert_eq!(preview.member_count, 2);
+        assert!(
+            preview.note().contains("byte identical"),
+            "{}",
+            preview.note()
+        );
+    }
+
+    /// ⚠️ **The "reports a difference" half is not tested here, because this crate cannot produce
+    /// a file that differs.** Anything [`ArchiveBuilder`] writes round-trips through
+    /// [`RebuildPreview::of`] byte for byte — the previous test — so a difference can only come from
+    /// an archive laid out some *other* way, and the only such archives are real maps. That case is
+    /// covered where real maps are available: the command line's own tests run
+    /// `war3 map rebuild` against a map named by an environment variable.
+    ///
+    /// Deliberately no test that asserts a difference from our own output. One was written and it
+    /// passed for the wrong reason — `add_stored` was called in reverse name order and `file_names`
+    /// sorts, so it reproduced the same bytes. A green test that does not exercise what its name
+    /// claims is worse than no test.
+    #[test]
+    fn a_length_difference_is_a_difference() {
+        assert_eq!(first_difference_of(b"abc", b"abc"), None);
+        assert_eq!(first_difference_of(b"abc", b"abd"), Some(2));
+        assert_eq!(first_difference_of(b"abc", b"abcd"), Some(3));
+        assert_eq!(first_difference_of(b"abcd", b"abc"), Some(3));
+        assert_eq!(first_difference_of(b"", b"a"), Some(0));
+        assert_eq!(first_difference_of(b"", b""), None);
+    }
+
+    /// ⚠️ The distinction the editor used to make by string prefix: a member that cannot be
+    /// relocated is a limitation of the file, not a fault.
+    ///
+    /// # Why this does not go through a preview
+    ///
+    /// It cannot: `ArchiveBuilder::add_raw` refuses to *write* a `BLOCK_OFFSET_ADJUSTED_KEY`
+    /// member, which is what [`RebuildPreview::of`] uses, and `ArchivePatcher::replace` writes its
+    /// own flags rather than taking them. There is therefore no way to build a file with such a
+    /// member from inside this crate, and the end-to-end path needs a real map that has one.
+    /// What is testable here is the classification itself, which is the part the editor reads.
+    #[test]
+    fn a_member_that_cannot_be_moved_is_not_applicable_rather_than_a_fault() {
+        let not_applicable = MpqError::MemberNotWritable {
+            name: "(listfile)".to_string(),
+            reason: "its key is derived from its block offset",
+        };
+        assert!(not_applicable.is_not_applicable());
+
+        // And a malformed file is a fault, with no action attached.
+        assert!(!MpqError::NoArchiveHeader.is_not_applicable());
+        assert!(!MpqError::Eof.is_not_applicable());
+        assert!(!MpqError::NotFound("x".to_string()).is_not_applicable());
+        assert!(!MpqError::BadPrefixLength(7).is_not_applicable());
+    }
+
     #[test]
     fn colliding_names_both_resolve() {
         // Two members whose names hash to the same home slot have to be placed
@@ -642,7 +834,10 @@ mod patcher_tests {
         patcher.replace("war3map.w3i", b"edited".to_vec()).unwrap();
 
         let patched = Archive::from_bytes(patcher.to_bytes()).expect("the patched archive reads");
-        assert_eq!(patched.read_file("war3map.wts").unwrap(), b"original-strings");
+        assert_eq!(
+            patched.read_file("war3map.wts").unwrap(),
+            b"original-strings"
+        );
         assert_eq!(patched.read_file("war3map.w3i").unwrap(), b"edited");
     }
 
@@ -693,19 +888,22 @@ mod patcher_tests {
     #[test]
     fn an_encrypted_member_is_refused_rather_than_made_readable() {
         let mut builder = ArchiveBuilder::new();
-        builder.add_raw(RawMember {
-            name: "secret.w3i".to_string(),
-            block: vec![0u8; 8],
-            uncompressed_size: 8,
-            flags: BlockFlags(0x8000_0000 | 0x0001_0000), // exists | encrypted
-            locale: 0,
-            platform: 0,
-        })
-        .unwrap();
+        builder
+            .add_raw(RawMember {
+                name: "secret.w3i".to_string(),
+                block: vec![0u8; 8],
+                uncompressed_size: 8,
+                flags: BlockFlags(0x8000_0000 | 0x0001_0000), // exists | encrypted
+                locale: 0,
+                platform: 0,
+            })
+            .unwrap();
         let bytes = builder.to_bytes().unwrap();
 
         let mut patcher = ArchivePatcher::new(bytes).unwrap();
-        let err = patcher.replace("secret.w3i", b"plain".to_vec()).unwrap_err();
+        let err = patcher
+            .replace("secret.w3i", b"plain".to_vec())
+            .unwrap_err();
         match err {
             MpqError::MemberNotWritable { reason, .. } => {
                 assert!(reason.contains("encrypted"), "reason was: {reason}");

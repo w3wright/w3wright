@@ -19,3 +19,6 @@ war3-terrain.workspace = true
 war3-meta.workspace = true
 war3-object.workspace = true
 war3-project.workspace = true
+# `mpq` because a command line has nowhere else to get the game's data from: there is no host
+# application to hand it an `AssetSource`, so it opens the archives itself.
+war3-game = { workspace = true, features = ["mpq"] }
