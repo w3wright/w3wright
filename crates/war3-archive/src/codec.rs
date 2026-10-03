@@ -91,7 +91,10 @@ impl fmt::Display for CodecError {
             }
             Self::Unsupported(m) => write!(f, "unsupported compression mask {m:#010X}"),
             Self::BadPkwareMode(m) => {
-                write!(f, "invalid PKWare implode compression mode {m} (expected 0 or 1)")
+                write!(
+                    f,
+                    "invalid PKWare implode compression mode {m} (expected 0 or 1)"
+                )
             }
             Self::BadDictionarySize(bits) => {
                 write!(
@@ -100,15 +103,9 @@ impl fmt::Display for CodecError {
                 )
             }
             Self::BadLiteralCode(peek) => {
-                write!(
-                    f,
-                    "invalid PKWare literal code starting {peek:#010b}"
-                )
+                write!(f, "invalid PKWare literal code starting {peek:#010b}")
             }
-            Self::BadMatchDistance {
-                distance,
-                produced,
-            } => write!(
+            Self::BadMatchDistance { distance, produced } => write!(
                 f,
                 "PKWare match distance {distance} exceeds the {produced} bytes produced so far"
             ),

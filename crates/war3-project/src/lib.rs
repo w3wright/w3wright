@@ -26,8 +26,8 @@
 #![warn(missing_debug_implementations)]
 
 pub mod codecs;
-pub mod disposition;
 pub mod config;
+pub mod disposition;
 pub mod doodads_text;
 pub mod ini;
 pub mod layout;

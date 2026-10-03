@@ -232,7 +232,12 @@ mod tests {
     fn the_directory_is_what_a_codec_can_recognise_a_member_by() {
         // Script source is found by directory, not by a list of names, so both
         // spellings the game uses resolve the same way.
-        for member in ["war3map.j", "WAR3MAP.J", "scripts\\war3map.j", "war3map.lua"] {
+        for member in [
+            "war3map.j",
+            "WAR3MAP.J",
+            "scripts\\war3map.j",
+            "war3map.lua",
+        ] {
             assert_eq!(member_dir(member), "scripts", "{member}");
         }
         assert_eq!(member_dir("war3map.w3i"), "info");

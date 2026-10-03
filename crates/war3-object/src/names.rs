@@ -51,7 +51,10 @@ use crate::object::{FieldValue, ObjectFile};
 /// It is still the default here, because this crate has no metadata to ask and must not depend on the
 /// crate that does. A caller that knows the kind passes the right one to [`ObjectNames::add_with`];
 /// [`names_for`] is what the CLI and the editor use.
-const NAME_FIELD: &str = "unam";
+///
+/// Public because the two functions above document it as the default they use, and a reader sent
+/// looking for it should find it rather than a link that does not resolve.
+pub const NAME_FIELD: &str = "unam";
 
 /// What a map calls one of its objects.
 #[derive(Debug, Clone, PartialEq, Eq)]

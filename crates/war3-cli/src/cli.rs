@@ -82,16 +82,26 @@ pub fn required_arg<'a>(
 mod tests {
     use super::*;
 
+    /// Compares two exit codes by their `Debug` form rather than with `==`.
+    ///
+    /// `std::process::ExitCode` only gained `PartialEq` in Rust 1.78, and this
+    /// workspace promises 1.75, so `assert_eq!(code, ExitCode::SUCCESS)` does
+    /// not compile on the MSRV. Formatting both sides is the comparison the
+    /// older compiler accepts.
+    fn assert_exit_code(actual: ExitCode, expected: ExitCode) {
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    }
+
     #[test]
     fn no_args_prints_help_and_succeeds() {
         let code = run(&[]).unwrap();
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_exit_code(code, ExitCode::SUCCESS);
     }
 
     #[test]
     fn help_flag_succeeds() {
-        assert_eq!(run(&["--help".into()]).unwrap(), ExitCode::SUCCESS);
-        assert_eq!(run(&["-h".into()]).unwrap(), ExitCode::SUCCESS);
+        assert_exit_code(run(&["--help".into()]).unwrap(), ExitCode::SUCCESS);
+        assert_exit_code(run(&["-h".into()]).unwrap(), ExitCode::SUCCESS);
     }
 
     #[test]

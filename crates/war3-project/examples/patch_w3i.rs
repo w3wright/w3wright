@@ -18,9 +18,7 @@ use war3_project::w3i_text;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let map = args
-        .next()
-        .ok_or("usage: patch_w3i <map> [out.w3x]")?;
+    let map = args.next().ok_or("usage: patch_w3i <map> [out.w3x]")?;
     let out = args.next().unwrap_or_else(|| {
         let mut p = std::path::PathBuf::from(&map);
         let stem = p
@@ -85,7 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&out, &patched)?;
 
     // ---- the acceptance assertions ----
-    println!("patched  {} bytes (+{})", patched.len(), patched.len() - original.len());
+    println!(
+        "patched  {} bytes (+{})",
+        patched.len(),
+        patched.len() - original.len()
+    );
 
     // Everything up to the block table is untouched: prefix, header, all the member
     // data, and the hash table. This is the strong claim a rebuild cannot make.
@@ -109,7 +111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1..n differently even though their plaintext is identical. Comparing ciphertext
     // would therefore look alarming and mean nothing. Comparing the decoded entries is
     // the check that matters, and it is the one that says the neighbours are intact.
-    let patched_index = archive.block_index_for_name("war3map.w3i")
+    let patched_index = archive
+        .block_index_for_name("war3map.w3i")
         .ok_or("war3map.w3i has no block")? as usize;
     let before = war3_archive::Archive::from_bytes(original.clone())?;
     let after = war3_archive::Archive::from_bytes(patched.clone())?;
@@ -126,15 +129,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         if a != b {
-            return Err(format!(
-                "FAIL: block entry {index} changed: {a:?} vs {b:?}"
-            )
-            .into());
+            return Err(format!("FAIL: block entry {index} changed: {a:?} vs {b:?}").into());
         }
         compared += 1;
     }
-    println!("✓ {compared} other block table entries decode identically (patched index {patched_index})");
-
+    println!(
+        "✓ {compared} other block table entries decode identically (patched index {patched_index})"
+    );
 
     // The appended bytes are exactly the edited member.
     // ⚠️ Not "everything after the block table": a real map can carry its own bytes
@@ -164,12 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match (old, new) {
             (Ok(a), Ok(b)) if a == b => checked += 1,
             (Err(a), Err(b)) if a.to_string() == b.to_string() => checked += 1,
-            (a, b) => {
-                return Err(format!(
-                    "FAIL: member {name} changed: {a:?} vs {b:?}"
-                )
-                .into())
-            }
+            (a, b) => return Err(format!("FAIL: member {name} changed: {a:?} vs {b:?}").into()),
         }
     }
     println!("✓ {checked} untouched members read back identically");

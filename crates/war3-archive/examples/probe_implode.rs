@@ -10,9 +10,9 @@ use war3_archive::Archive;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let map = args.next().unwrap_or_else(|| {
-        "D:\\Warcraft3\\Maps\\(4)LostTemple.w3m".to_string()
-    });
+    let map = args
+        .next()
+        .unwrap_or_else(|| "D:\\Warcraft3\\Maps\\(4)LostTemple.w3m".to_string());
     let member = args.next().unwrap_or_else(|| "WAR3MAP.WTS".to_string());
 
     let archive = Archive::open(&map)?;
@@ -24,13 +24,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("platform  {}", raw.platform);
     println!("block     {} bytes", raw.block.len());
 
-    let head = raw.block.iter().take(32).map(|b| format!("{b:02X}")).collect::<Vec<_>>();
+    let head = raw
+        .block
+        .iter()
+        .take(32)
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>();
     println!("first 32  {}", head.join(" "));
     let ascii: String = raw
         .block
         .iter()
         .take(32)
-        .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
+        .map(|&b| {
+            if (32..127).contains(&b) {
+                b as char
+            } else {
+                '.'
+            }
+        })
         .collect();
     println!("as ascii  {ascii}");
 
@@ -40,10 +51,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // header and confusing them is easy.
     if let Some((mask, body)) = raw.block.split_first() {
         println!("mask byte {mask:#04X}");
-        let body_head = body.iter().take(24).map(|b| format!("{b:02X}")).collect::<Vec<_>>();
+        let body_head = body
+            .iter()
+            .take(24)
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>();
         println!("body      {}", body_head.join(" "));
-        println!("body[0] (implode compression type) = {}", body.first().copied().unwrap_or(255));
-        println!("body[1] (implode dict size bits)   = {}", body.get(1).copied().unwrap_or(255));
+        println!(
+            "body[0] (implode compression type) = {}",
+            body.first().copied().unwrap_or(255)
+        );
+        println!(
+            "body[1] (implode dict size bits)   = {}",
+            body.get(1).copied().unwrap_or(255)
+        );
 
         let declared = raw.uncompressed_size as usize;
         println!("declared  {declared} bytes");
@@ -53,7 +74,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let text: String = out
                     .iter()
                     .take(160)
-                    .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
+                    .map(|&b| {
+                        if (32..127).contains(&b) {
+                            b as char
+                        } else {
+                            '.'
+                        }
+                    })
                     .collect();
                 println!("text      {text}");
             }
@@ -95,7 +122,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let text: String = out
                             .iter()
                             .take(96)
-                            .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
+                            .map(|&b| {
+                                if (32..127).contains(&b) {
+                                    b as char
+                                } else {
+                                    '.'
+                                }
+                            })
                             .collect();
                         println!("  offset {i:3}: OK {} bytes  {text}", out.len());
                     }
@@ -120,18 +153,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let masked = raw.flags.0 & 0x0000_0200 != 0;
         let single = raw.flags.0 & 0x0100_0000 != 0;
         let data: &[u8] = if masked && !single {
-            let start = u32::from_le_bytes([
-                raw.block[0],
-                raw.block[1],
-                raw.block[2],
-                raw.block[3],
-            ]) as usize;
-            let end = u32::from_le_bytes([
-                raw.block[4],
-                raw.block[5],
-                raw.block[6],
-                raw.block[7],
-            ]) as usize;
+            let start = u32::from_le_bytes([raw.block[0], raw.block[1], raw.block[2], raw.block[3]])
+                as usize;
+            let end = u32::from_le_bytes([raw.block[4], raw.block[5], raw.block[6], raw.block[7]])
+                as usize;
             println!("\nsector table: first sector {start}..{end}");
             &raw.block[start..end.min(raw.block.len())]
         } else {
@@ -160,7 +185,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         outcome.expected,
                         outcome.error,
                         outcome.saw_end_marker
-                    );                    if outcome.is_complete() {
+                    );
+                    if outcome.is_complete() {
                         std::fs::write(&out_path, &outcome.out)?;
                         println!("rust     wrote {out_path}");
                     } else {
@@ -170,7 +196,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let show = outcome.out.len().min(80);
                         let text: String = outcome.out[..show]
                             .iter()
-                            .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
+                            .map(|&b| {
+                                if (32..127).contains(&b) {
+                                    b as char
+                                } else {
+                                    '.'
+                                }
+                            })
                             .collect();
                         println!("rust     prefix: {text}");
                     }

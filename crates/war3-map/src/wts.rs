@@ -337,7 +337,11 @@ mod tests {
         let raw = b"\xEF\xBB\xBFSTRING 1\r\n{\r\n\xE5\x90\x8D\xE5\xAD\x97\r\n}\r\n\r\nSTRING 2\r\n{\r\nsecond\r\n}\r\n";
         let table = StringTable::parse(raw);
         assert_eq!(table.len(), 2, "both entries must be seen");
-        assert_eq!(table.get(1), Some("\u{540d}\u{5b57}"), "the BOM-prefixed first entry");
+        assert_eq!(
+            table.get(1),
+            Some("\u{540d}\u{5b57}"),
+            "the BOM-prefixed first entry"
+        );
         assert_eq!(table.get(2), Some("second"));
         assert!(
             !table.diagnostics().has_problems(),

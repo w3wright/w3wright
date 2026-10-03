@@ -175,7 +175,6 @@ pub fn extract(map: &Path, dir: &Path, drop_unnamed: bool) -> Result<ExtractRepo
     })
 }
 
-
 /// The bytes a `[text]` member produces, read back from the file on disk.
 ///
 /// One routine for all three callers — `build`, its self-verification, and

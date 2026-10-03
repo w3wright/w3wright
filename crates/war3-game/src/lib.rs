@@ -17,13 +17,13 @@
 //!
 //! Two levels, deliberately:
 //!
-//! 1. **[`cached::Cached`]** wraps any [`AssetSource`] and remembers each file it has been asked
-//!    for. This is for the caller that resolves names while a map is open: reading a 400 KB `.slk`
-//!    out of an MPQ means locating, decompressing and parsing it, and a lookup that repeats per
-//!    table row would pay for that per row.
-//! 2. **The caller keeps one [`assets::GameAssets`] per game directory.** Opening it reads the
-//!    hash and block tables of four archives — 17,660 enumerable names on this machine — and that
-//!    is the expensive part, not the file reads.
+//! 1. **[`cached::Cached`]** wraps any [`war3_core::AssetSource`] and remembers each file it has been
+//!    asked for. This is for the caller that resolves names while a map is open: reading a 400 KB
+//!    `.slk` out of an MPQ means locating, decompressing and parsing it, and a lookup that repeats
+//!    per table row would pay for that per row.
+//! 2. **The caller keeps one [`GameAssets`] per game directory.** Opening it reads the hash and
+//!    block tables of four archives — 17,660 enumerable names on this machine — and that is the
+//!    expensive part, not the file reads.
 //!
 //! ⚠️ **This crate holds no cache of its own.** A library with a global mutable cache is a library
 //! that cannot be used twice, cannot be tested and cannot be reasoned about; the caller knows when

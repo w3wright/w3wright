@@ -18,10 +18,11 @@
 //! The build path reads a `[text]` member back as a `String` (`project::build`
 //! calls `String::from_utf8`), so a script that is not UTF-8 **cannot** be
 //! promised to round-trip through the text table. Rather than letting such a map
-//! fail later during `build`, this codec refuses it here: [`codec_for`] produces
-//! no text form, the member stays in `[binary]`, and `extract` reports why. That
-//! is the same "textify or keep verbatim, never silently" rule as every other
-//! member (ADR-0021), applied to the one member whose text form is not a parse.
+//! fail later during `build`, this codec refuses it here:
+//! [`crate::codecs::codec_for_member`] produces no text form, the member stays in
+//! `[binary]`, and `extract` reports why. That is the same "textify or keep
+//! verbatim, never silently" rule as every other member (ADR-0021), applied to
+//! the one member whose text form is not a parse.
 //!
 //! Measured on this machine's corpus (190 maps, 188 readable): 16 scripts contain
 //! non-ASCII bytes and are not all UTF-8, so this gate is load-bearing. The rest
@@ -105,7 +106,8 @@ mod tests {
     fn the_text_form_reproduces_the_script_exactly() {
         // CRLF, tabs, a block comment, an escape, a `$` name and non-ASCII text:
         // everything the corpus is known to contain, in one input.
-        let src = b"// \xe4\xbd\x9c\xe8\x80\x85\r\n\tcall SetMapName(\"\xe4\xb8\xad\xe6\x96\x87\")\r\n\
+        let src =
+            b"// \xe4\xbd\x9c\xe8\x80\x85\r\n\tcall SetMapName(\"\xe4\xb8\xad\xe6\x96\x87\")\r\n\
                     /* \\\\ */\r\nset $A = 0x1F\r\n";
         let codec = codec_for_script("war3map.j", src).expect("valid UTF-8 script");
         let text = (codec.to_text)("war3map.j", src).unwrap();
@@ -122,7 +124,10 @@ mod tests {
         let src = b"\xEF\xBB\xBFfunction main takes nothing returns nothing\nendfunction\n";
         let codec = codec_for_script("war3map.j", src).expect("a BOM is valid UTF-8");
         let text = (codec.to_text)("war3map.j", src).unwrap();
-        assert!(text.starts_with('\u{feff}'), "the BOM survives as a character");
+        assert!(
+            text.starts_with('\u{feff}'),
+            "the BOM survives as a character"
+        );
         assert_eq!((codec.from_text)("war3map.j", &text).unwrap(), src);
     }
 

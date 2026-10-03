@@ -556,7 +556,9 @@ impl<'a> Reader<'a> {
         self.bytes.len()
     }
 
-    const fn seek(&mut self, pos: usize) {
+    /// A `&mut self` method cannot be `const` on the 1.75 MSRV, which is why
+    /// this is a plain `fn` while the accessors above are not.
+    fn seek(&mut self, pos: usize) {
         self.pos = pos;
     }
 

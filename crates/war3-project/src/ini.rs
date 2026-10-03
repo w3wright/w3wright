@@ -516,7 +516,11 @@ mod set_semantics_tests {
         section.set("other", "kept");
         section.set("name", "after");
 
-        assert_eq!(section.get("name"), Some("after"), "the edit must be visible");
+        assert_eq!(
+            section.get("name"),
+            Some("after"),
+            "the edit must be visible"
+        );
         assert_eq!(section.entries.len(), 2, "no duplicate was added");
         assert_eq!(
             section.entries[0].0, "name",

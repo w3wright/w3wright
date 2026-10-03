@@ -23,9 +23,7 @@
 use war3_archive::Archive;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let map = std::env::args()
-        .nth(1)
-        .ok_or("usage: dump_masks <map>")?;
+    let map = std::env::args().nth(1).ok_or("usage: dump_masks <map>")?;
     let archive = Archive::open(&map)?;
 
     let mut names = archive.file_names();
@@ -46,7 +44,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (mask, note) = if !masked {
             (0u8, "uncompressed".to_string())
         } else if single {
-            (block.first().copied().unwrap_or(0), "single unit".to_string())
+            (
+                block.first().copied().unwrap_or(0),
+                "single unit".to_string(),
+            )
         } else {
             let start = u32::from_le_bytes([block[0], block[1], block[2], block[3]]) as usize;
             (
