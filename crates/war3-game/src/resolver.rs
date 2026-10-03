@@ -21,6 +21,7 @@ use std::collections::HashMap;
 
 use war3_meta::ObjectKind;
 
+use crate::fields::{FieldFact, FieldFacts};
 use crate::names::Names;
 use crate::strings::WorldStrings;
 
@@ -71,6 +72,8 @@ pub struct Resolver {
     names: Names,
     /// `UI\WorldEditStrings.txt`, for the two kinds whose names are keys.
     strings: WorldStrings,
+    /// Field labels and types, read once from the metadata tables.
+    fields: FieldFacts,
     /// What a map overrides, keyed by kind and lower-cased ID.
     overrides: HashMap<(ObjectKind, String), String>,
 }
@@ -82,6 +85,7 @@ impl Resolver {
         Self {
             names,
             strings,
+            fields: FieldFacts::new(),
             overrides: HashMap::new(),
         }
     }
@@ -112,7 +116,48 @@ impl Resolver {
                 strings.merge(&WorldStrings::parse(&text));
             }
         }
-        Self::new(Names::load(source), strings)
+        // ⚠️ The field tables are read **after** the string tables, because a field's label is a
+        // `WESTRING_*` key that only the string tables can resolve. Reading them the other way round
+        // would store keys where labels belong and every field would show `WESTRING_UEVAL_UNAM`.
+        //
+        // This is the expensive half of loading — six `.slk` tables and a 370 KB string table — and it
+        // is why the whole `Resolver` is built once and kept rather than per lookup.
+        let fields = FieldFacts::load(source, &strings);
+        let mut resolver = Self::new(Names::load(source), strings);
+        resolver.fields = fields;
+        resolver
+    }
+
+    /// What a field is called, and what kind of value it holds.
+    ///
+    /// `None` for a field the metadata does not describe, which is the case for a map written by a
+    /// tool that invented a field id — the caller then shows the id, as everywhere else here.
+    #[must_use]
+    pub fn field(&self, kind: ObjectKind, field_id: &str) -> Option<&FieldFact> {
+        self.fields.fact(kind, field_id)
+    }
+
+    /// The text for a word-valued field, e.g. `attackType` + `hero` → 英雄.
+    ///
+    /// ⚠️ The value is the editor's own key, and the text it points at is another `WESTRING_*` key —
+    /// so this resolves **twice**, and the second hop is the one that is easy to forget. Measured:
+    /// `UnitEditorData.txt`'s `[attackType] 01=hero,WESTRING_AT_HERO` and the game's strings then say
+    /// `WESTRING_AT_HERO=英雄`.
+    #[must_use]
+    pub fn word(&self, type_name: &str, value: &str) -> Option<String> {
+        let key = self.fields.word_text(type_name, value)?;
+        // The word's own text may be literal rather than a key, which is why this falls back to it.
+        Some(
+            self.strings
+                .get(key)
+                .map_or_else(|| key.to_string(), str::to_string),
+        )
+    }
+
+    /// How many field labels were resolved, for a report.
+    #[must_use]
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
     }
 
     /// Records what a map's object data overrides.

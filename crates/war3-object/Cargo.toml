@@ -10,6 +10,10 @@ rust-version.workspace = true
 [dependencies]
 war3-core = { workspace = true }
 war3-meta = { workspace = true }
+# For the map's string table. ⚠️ A map's `unam` field is usually a `TRIGSTR_nnn` reference rather
+# than text, so naming an object means resolving one — see `src/names.rs`. The dependency is on the
+# **string table type**, not on map parsing: nothing here opens a map.
+war3-map = { workspace = true }
 
 # Only `examples/objects_roundtrip.rs` needs to open map archives: parsing and
 # writing object data is independent of the container it arrived in, so the

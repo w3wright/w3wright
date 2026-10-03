@@ -59,6 +59,7 @@ version = "0.0.3"
 dependencies = [
  "war3-archive",
  "war3-core",
+ "war3-map",
  "war3-meta",
 ]
 

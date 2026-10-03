@@ -44,6 +44,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod cached;
+pub mod fields;
 pub mod names;
 pub mod resolver;
 pub mod strings;
@@ -53,6 +54,7 @@ pub mod sylk;
 pub mod mpq;
 
 pub use cached::Cached;
+pub use fields::{list_element_kind, name_field, value_shape, FieldFact, FieldFacts, ValueShape};
 pub use names::{NameStats, Names};
 pub use resolver::{NameSource, Resolved, Resolver};
 pub use strings::{parse_sections, WorldStrings};

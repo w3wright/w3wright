@@ -181,7 +181,26 @@ pub struct Diagnostic {
     /// Stable code.
     pub code: DiagnosticCode,
     /// Human-readable message, including the numbers involved.
+    ///
+    /// ⚠️ Where a diagnostic is *about* one member, field or record, the message also begins
+    /// `"<subject>: "` — and [`Diagnostic::subject`] carries that subject **as a field**. Both exist
+    /// on purpose:
+    ///
+    /// - The prefix is kept because the message is what `war3 map list` prints, and that line stands
+    ///   alone on a terminal where nothing else says which member it concerns.
+    /// - The field is added because a *table* with a name column does not need the prefix, and a
+    ///   consumer that had only the message could recover the subject **only by parsing the text**.
+    ///   The editor did exactly that — `strip_prefix(name).and_then(|r| r.strip_prefix(": "))` — which
+    ///   is a second implementation of the core's own formatting, free to break silently the moment
+    ///   the wording changes.
+    ///
+    /// The two are kept consistent by construction: a caller that passes a subject writes the prefix
+    /// itself, and [`Diagnostic::display_message`] is what a consumer uses when it has its own
+    /// column for the name.
     pub message: String,
+    /// What this diagnostic is about — a member name, a field id — or `None` when it is about the
+    /// file as a whole.
+    pub subject: Option<String>,
 }
 
 impl Diagnostic {
@@ -191,6 +210,7 @@ impl Diagnostic {
             severity,
             code,
             message: message.into(),
+            subject: None,
         }
     }
 
@@ -207,6 +227,33 @@ impl Diagnostic {
     /// `Error` level: parsing can continue, but the data may be wrong.
     pub fn error(code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self::new(Severity::Error, code, message)
+    }
+
+    /// Records what this diagnostic is about.
+    ///
+    /// A builder rather than a constructor argument so that the fifty-odd existing construction sites
+    /// keep working: most diagnostics are about a file rather than one member of it, and giving every
+    /// one of them a `None` to pass would have been churn that says nothing.
+    #[must_use]
+    pub fn about(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    /// The message without the subject prefix, for a consumer that shows the subject separately.
+    ///
+    /// Removes exactly `"<subject>: "` from the front, and nothing else. A message that merely
+    /// contains the subject later is returned unchanged — rewriting the middle of the core's sentence
+    /// would make the two views disagree about what it says.
+    #[must_use]
+    pub fn display_message(&self) -> &str {
+        let Some(subject) = self.subject.as_deref() else {
+            return &self.message;
+        };
+        self.message
+            .strip_prefix(subject)
+            .and_then(|rest| rest.strip_prefix(": "))
+            .unwrap_or(&self.message)
     }
 }
 
@@ -368,5 +415,58 @@ mod tests {
         let s = d.to_string();
         assert!(s.contains("wts.missing-key"), "{s}");
         assert!(s.contains("TRIGSTR_003"), "{s}");
+    }
+
+    /// A diagnostic with no subject has nothing to strip.
+    #[test]
+    fn a_diagnostic_without_a_subject_displays_its_message_whole() {
+        let d = Diagnostic::warn(DiagnosticCode::WtsMissingKey, "TRIGSTR_003 not found");
+        assert_eq!(d.subject, None);
+        assert_eq!(d.display_message(), "TRIGSTR_003 not found");
+        // And `Display` is unchanged, prefix or not.
+        assert!(d.to_string().contains("TRIGSTR_003 not found"));
+    }
+
+    /// ⚠️ The prefix is removed for a consumer that has its own name column, and **only** from the
+    /// front. This is the behaviour the editor used to implement itself, by string surgery on the
+    /// core's sentence.
+    #[test]
+    fn a_subject_is_removed_only_as_a_prefix() {
+        let d = Diagnostic::warn(
+            DiagnosticCode::ProjectMemberKeptBinary,
+            "WAR3MAP.WTS: kept as binary, no text form",
+        )
+        .about("WAR3MAP.WTS");
+
+        assert_eq!(d.subject.as_deref(), Some("WAR3MAP.WTS"));
+        assert_eq!(d.display_message(), "kept as binary, no text form");
+        // The message itself keeps the prefix, because `war3 map list` prints it on a line where
+        // nothing else says which member it concerns.
+        assert!(d.message.starts_with("WAR3MAP.WTS: "));
+        assert!(d.to_string().contains("WAR3MAP.WTS: kept as binary"));
+    }
+
+    /// A subject that merely appears later in the sentence must be left alone: rewriting the middle
+    /// of the core's own message would make two views disagree about what it says.
+    #[test]
+    fn a_subject_appearing_later_is_not_removed() {
+        let d = Diagnostic::warn(
+            DiagnosticCode::ProjectMemberKeptBinary,
+            "kept as binary: WAR3MAP.WTS could not be parsed",
+        )
+        .about("WAR3MAP.WTS");
+        assert_eq!(
+            d.display_message(),
+            "kept as binary: WAR3MAP.WTS could not be parsed"
+        );
+    }
+
+    /// A colon that is not the `": "` separator is not a separator, and neither is the name with
+    /// nothing after it.
+    #[test]
+    fn a_name_followed_by_no_separator_is_not_stripped() {
+        let d =
+            Diagnostic::warn(DiagnosticCode::WtsMissingKey, "WAR3MAP.WTS:").about("WAR3MAP.WTS");
+        assert_eq!(d.display_message(), "WAR3MAP.WTS:");
     }
 }

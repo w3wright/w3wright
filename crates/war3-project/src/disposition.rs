@@ -80,13 +80,18 @@ pub fn of(
     Ok(match text_form(name, &content, diagnostics)? {
         Some(text) => Disposition::Textified { text },
         None => {
-            // `text_form` pushed the specific reason already; the caller-facing
-            // reason is the last one recorded, which is this member's.
+            // `text_form` pushed the specific reason already; the caller-facing reason is the last
+            // one recorded, which is this member's.
+            //
+            // ⚠️ `display_message` and not `message`: this reason is shown **beside** the member's
+            // name in a table with a name column, so the message's own `"<name>: "` prefix would
+            // print the name twice. The subject travels as a field now, so this no longer needs the
+            // consumer to strip it by string surgery.
             let reason = diagnostics
                 .items()
                 .last()
-                .map(|d: &Diagnostic| d.message.clone())
-                .unwrap_or_else(|| format!("{name}: no text form"));
+                .map(|d: &Diagnostic| d.display_message().to_string())
+                .unwrap_or_else(|| "no text form".to_string());
             Disposition::KeptBinary { reason }
         }
     })
@@ -116,10 +121,13 @@ pub fn text_form(
     let text = match (codec.to_text)(name, content) {
         Ok(text) => text,
         Err(e) => {
-            diagnostics.push(Diagnostic::warn(
-                DiagnosticCode::ProjectMemberKeptBinary,
-                format!("{name}: kept as binary, its text form could not be produced: {e}"),
-            ));
+            diagnostics.push(
+                Diagnostic::warn(
+                    DiagnosticCode::ProjectMemberKeptBinary,
+                    format!("{name}: kept as binary, its text form could not be produced: {e}"),
+                )
+                .about(name),
+            );
             return Ok(None);
         }
     };
@@ -127,22 +135,28 @@ pub fn text_form(
         Ok(back) if back == content => Ok(Some(text)),
         Ok(back) => {
             let at = back.iter().zip(content).position(|(a, b)| a != b);
-            diagnostics.push(Diagnostic::warn(
-                DiagnosticCode::ProjectMemberKeptBinary,
-                format!(
-                    "{name}: kept as binary, the text form gives {} bytes against {} and first \
-                     differs at {at:?}",
-                    back.len(),
-                    content.len()
-                ),
-            ));
+            diagnostics.push(
+                Diagnostic::warn(
+                    DiagnosticCode::ProjectMemberKeptBinary,
+                    format!(
+                        "{name}: kept as binary, the text form gives {} bytes against {} and first \
+                         differs at {at:?}",
+                        back.len(),
+                        content.len()
+                    ),
+                )
+                .about(name),
+            );
             Ok(None)
         }
         Err(e) => {
-            diagnostics.push(Diagnostic::warn(
-                DiagnosticCode::ProjectMemberKeptBinary,
-                format!("{name}: kept as binary, the text form does not parse back: {e}"),
-            ));
+            diagnostics.push(
+                Diagnostic::warn(
+                    DiagnosticCode::ProjectMemberKeptBinary,
+                    format!("{name}: kept as binary, the text form does not parse back: {e}"),
+                )
+                .about(name),
+            );
             Ok(None)
         }
     }

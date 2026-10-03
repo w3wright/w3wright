@@ -327,7 +327,8 @@ mod tests {
 
     /// Several colours in one string, with plain text between them.
     #[test]
-    fn runs_are_split_and_the_plain_text_between_them_is_kept() {        let text = "before |cffff0000red|r middle |cff00ff00green|r after";
+    fn runs_are_split_and_the_plain_text_between_them_is_kept() {
+        let text = "before |cffff0000red|r middle |cff00ff00green|r after";
         let spans = spans(text);
         assert_eq!(spans.len(), 5, "{spans:?}");
         assert_eq!(spans[0], Markup::Plain("before ".to_string()));

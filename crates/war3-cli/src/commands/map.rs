@@ -10,6 +10,15 @@ use war3_map::{Map, MapSource};
 use crate::cli::required_arg;
 use crate::outfmt;
 
+/// How many rows the "most common types" section prints.
+///
+/// ⚠️ **This is a display limit, not a fact about the file**, and it is deliberately here rather
+/// than in `war3_map::UnitSummary`. The histogram the core returns is complete — `(4)LostTemple.w3m`
+/// has 22 distinct unit types — and the editor's panel states "the 12 commonest of 22" rather than
+/// presenting this head as the whole. Putting the cap in the core would have made that impossible to
+/// say, because the caller would no longer know what it was not being told.
+const TYPE_ROWS: usize = 12;
+
 const USAGE: &str = "\
 USAGE:
   war3 map info <map> [--verbose]            map information
@@ -736,24 +745,20 @@ fn doodads(args: &[String]) -> Result<ExitCode> {
 
     println!("doodads  {path}");
     println!("{}", "=".repeat(60));
+    // From `war3_map::DoodadSummary`, the same implementation the editor uses. See `units` below.
+    let summary = war3_map::DoodadSummary::of(file);
     outfmt::field(
         "file version",
-        format!("v{}/sub{}", file.version, file.subversion),
+        format!("v{}/sub{}", summary.version, summary.subversion),
         20,
     );
-    outfmt::field("records", file.doodads.len(), 20);
-    let mut kinds = std::collections::BTreeMap::new();
-    for d in &file.doodads {
-        *kinds.entry(d.kind.to_string()).or_insert(0usize) += 1;
-    }
-    outfmt::field("distinct types", kinds.len(), 20);
-    outfmt::field("special doodads", file.special.len(), 20);
+    outfmt::field("records", summary.records, 20);
+    outfmt::field("distinct types", summary.types.distinct(), 20);
+    outfmt::field("special doodads", summary.special, 20);
 
     outfmt::section("most common types");
-    let mut ranked: Vec<_> = kinds.iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-    for (kind, count) in ranked.iter().take(12) {
-        outfmt::field(kind, count, 20);
+    for entry in summary.types.ranked().into_iter().take(TYPE_ROWS) {
+        outfmt::field(&entry.key, entry.count, 20);
     }
 
     outfmt::section("first records");
@@ -812,41 +817,27 @@ fn units(args: &[String]) -> Result<ExitCode> {
 
     println!("units  {path}");
     println!("{}", "=".repeat(60));
+    // ⚠️ Every number below comes from `war3_map::UnitSummary`, which is the **same** implementation
+    // the editor's panel uses. The counting used to be written out here and again there, with the
+    // same tie-break rule in both places — a coincidence, not a guarantee, and the symptom of it
+    // ending would have been two lists that cannot be compared row by row.
+    let summary = war3_map::UnitSummary::of(file);
     outfmt::field(
         "file version",
-        format!("v{}/sub{}", file.version, file.subversion),
+        format!("v{}/sub{}", summary.version, summary.subversion),
         20,
     );
-    outfmt::field("records", file.units.len(), 20);
-    // Version 8 always carries the item-table field, so counting its presence
-    // would claim every unit has item data. Only a real table index or an
-    // inventory counts.
-    let placed_items = file
-        .units
-        .iter()
-        .filter(|u| u.item_table.is_some_and(|t| t >= 0) || !u.inventory.is_empty())
-        .count();
-    let levelled = file.units.iter().filter(|u| u.hero_level > 1).count();
-    outfmt::field("levelled units", levelled, 20);
-    outfmt::field("with item data", placed_items, 20);
+    outfmt::field("records", summary.records, 20);
+    outfmt::field("levelled units", summary.levelled, 20);
+    outfmt::field("with item data", summary.placed_items, 20);
 
-    let mut kinds = std::collections::BTreeMap::new();
-    for u in &file.units {
-        *kinds.entry(u.kind.to_string()).or_insert(0usize) += 1;
-    }
     outfmt::section("most common types");
-    let mut ranked: Vec<_> = kinds.iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-    for (kind, count) in ranked.iter().take(12) {
-        outfmt::field(kind, count, 20);
+    for entry in summary.commonest_types(TYPE_ROWS) {
+        outfmt::field(&entry.key, entry.count, 20);
     }
 
     outfmt::section("by player");
-    let mut players = std::collections::BTreeMap::new();
-    for u in &file.units {
-        *players.entry(u.player).or_insert(0usize) += 1;
-    }
-    for (player, count) in &players {
+    for (player, count) in &summary.players {
         outfmt::field(&format!("player {player}"), count, 20);
     }
 

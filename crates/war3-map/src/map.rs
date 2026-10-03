@@ -97,6 +97,37 @@ pub fn normalise(name: &str) -> String {
         .to_lowercase()
 }
 
+/// Whether a file name is one the game will offer as a map.
+///
+/// # What this is, and what it is not
+///
+/// It answers **"should this file be listed"**, not "is this a map". The two are different
+/// questions and only the second is about bytes: a file with a map's extension can be truncated,
+/// encrypted with an unknown key or not a map at all, and nothing here can tell. What decides that
+/// is a parse, and it happens when the file is opened.
+///
+/// ⚠️ The distinction is worth stating because this function looks like a format rule and is not
+/// one. It carries the three extensions the game itself uses, and the reason it lives here rather
+/// than in a caller is the reason `docs/03` §1.1 gives: a second copy of "what counts as a map
+/// file" is free to disagree with this one, and the symptom would be an editor that offers a file
+/// the core refuses, or hides one it would have opened.
+///
+/// Case is ignored because real installations contain both `.W3X` and `.w3x`.
+#[must_use]
+pub fn is_map_file_name(name: &str) -> bool {
+    /// The extensions the game uses for a map. `.w3n` is a campaign, which the game can also load.
+    const MAP_EXTENSIONS: [&str; 3] = ["w3x", "w3m", "w3n"];
+
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            MAP_EXTENSIONS
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
+}
+
 /// One parsed map.
 ///
 /// Terrain is optional rather than defaulting to an empty terrain: "this map has
@@ -222,10 +253,16 @@ impl Map {
                     Some(file)
                 }
                 Err(e) => {
-                    diagnostics.push(war3_core::Diagnostic::error(
-                        war3_core::DiagnosticCode::DooUnknownField,
-                        format!("war3map.doo failed to parse; doodads skipped: {e}"),
-                    ));
+                    diagnostics.push(
+                        war3_core::Diagnostic::error(
+                            war3_core::DiagnosticCode::DooUnknownField,
+                            format!("war3map.doo failed to parse; doodads skipped: {e}"),
+                        )
+                        // The subject, so a consumer that wants "why is there no doodad data" can ask
+                        // for it by member instead of searching the message for the file name — which
+                        // matches the wrong diagnostic as soon as one name is a substring of another.
+                        .about("war3map.doo"),
+                    );
                     None
                 }
             },
@@ -238,10 +275,13 @@ impl Map {
                     Some(file)
                 }
                 Err(e) => {
-                    diagnostics.push(war3_core::Diagnostic::error(
-                        war3_core::DiagnosticCode::DooUnknownField,
-                        format!("war3mapUnits.doo failed to parse; units skipped: {e}"),
-                    ));
+                    diagnostics.push(
+                        war3_core::Diagnostic::error(
+                            war3_core::DiagnosticCode::DooUnknownField,
+                            format!("war3mapUnits.doo failed to parse; units skipped: {e}"),
+                        )
+                        .about("war3mapUnits.doo"),
+                    );
                     None
                 }
             },
@@ -584,5 +624,41 @@ mod tests {
         let source = MemoryMapSource::new().with("War3Map.W3I", minimal_w3i());
         assert!(source.get("war3map.w3i").is_some());
         assert!(source.get("WAR3MAP.W3I").is_some());
+    }
+
+    /// ⚠️ The oracle for the extension test is the same call in both directions: what must pass is
+    /// the list of names real installations contain, and what must fail is the list that looks like
+    /// a map and is not.
+    #[test]
+    fn map_file_names_are_recognised_regardless_of_case() {
+        for name in [
+            "a.w3x",
+            "a.W3X",
+            "a.W3m",
+            "A.W3N",
+            "(4)LostTemple.w3m",
+            "羊羊快跑v4.34.w3x",
+        ] {
+            assert!(is_map_file_name(name), "{name} should be offered");
+        }
+    }
+
+    /// A file that is not a map, and four near misses: the map's *inner* files, the bare extension,
+    /// a backup and a hidden file. `.w3x` is the interesting one — `Path::extension` reports `None`
+    /// for it, because the name has no stem, which is the behaviour we want and is easy to get wrong.
+    #[test]
+    fn not_every_name_that_mentions_a_map_is_one() {
+        for name in [
+            "a.txt",
+            "a.w3e",
+            "a.w3i",
+            "a.w3u",
+            "w3x",
+            "a.w3x.bak",
+            ".w3x",
+            "",
+        ] {
+            assert!(!is_map_file_name(name), "{name} should not be offered");
+        }
     }
 }

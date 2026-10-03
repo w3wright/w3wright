@@ -30,8 +30,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod names;
 pub mod object;
 
+pub use names::{names_for, ObjectName, ObjectNames};
 pub use object::{
     codes_agree, is_levelled, FieldType, FieldValue, Levelled, Modification, Object, ObjectFile,
     ObjectTable, SUPPORTED_VERSIONS,
