@@ -158,16 +158,23 @@ jobs:
   # cargo publish resolves each dependency against the live registry, so a
   # crate cannot be published before everything it depends on.
   #
-  #   war3-core
-  #     ├── war3-archive
-  #     │     └── war3-project
-  #     └── war3-terrain
-  #           ├── war3-meta
-  #           │     └── war3-object
-  #           └── war3-map  (also needs war3-archive)
+  # The graph is not a tree -- war3-map is reached from both war3-archive and
+  # war3-terrain -- so it is listed here as direct dependencies instead, which is
+  # exactly what the order has to respect:
+  #
+  #   war3-core      (nothing)
+  #   war3-archive   core
+  #   war3-terrain   core
+  #   war3-meta      core, terrain
+  #   war3-map       core, archive, terrain
+  #   war3-object    core, archive, map, meta
+  #   war3-project   core, archive, map, object
+  #   war3-game      core, archive, meta
   #
   # war3-cli is absent on purpose: it is a binary and ships as a GitHub Release
   # artifact, which is what map authors want, rather than through `cargo install`.
+  # It is still the reason war3-game has to be published at all -- the binary
+  # depends on it with the `mpq` feature.
   # ---------------------------------------------------------------------------
   publish:
     name: Publish to crates.io
@@ -244,7 +251,58 @@ jobs:
           # before everything it depends on. war3-cli is absent on purpose -- it
           # is a binary and ships as a GitHub Release artifact, which is what
           # map authors want, rather than through `cargo install`.
-          order="war3-core war3-archive war3-terrain war3-meta war3-object war3-map war3-project"
+          #
+          # ⚠️ war3-object comes AFTER war3-map, not before: war3-object depends on
+          # war3-map. An earlier revision had these two the other way round, which
+          # is why a release stopped at war3-object and retried 60 times waiting for
+          # a `war3-map 0.0.5` that could never arrive. Ordering is a property of the
+          # dependency graph, so check it there rather than by eye; /tmp/meta.json
+          # (written above) has the edges.
+          order="war3-core war3-archive war3-terrain war3-meta war3-map war3-object war3-project war3-game"
+
+          # Prove the order respects the graph before publishing anything. Getting
+          # this wrong is not loud: the loop waits the full 60 retries on a
+          # dependency that can never appear, so the release burns ten minutes and
+          # then fails with a message about indexing. Checking it here costs
+          # nothing and turns that into an immediate, explicit error.
+          #
+          # The edges come from the same `cargo metadata` used above, so this
+          # cannot agree with a stale copy of the graph. Dependencies outside the
+          # `war3-*` set are ignored: only these are published in order.
+          visited=""
+          for crate in $order; do
+            deps=$(jq -r --arg c "$crate" '
+              [ .packages[].name | select(startswith("war3-")) ] as $names
+              | .packages[] | select(.name == $c)
+              | [ .dependencies[].name | select(. as $d | $names | index($d)) ]
+              | join(" ")' /tmp/meta.json)
+
+            for dep in $deps; do
+              if [ "${visited} " != *" ${dep} "* ]; then
+                echo "::error::$crate depends on $dep, but \$order lists it later"
+                echo "Move $dep before $crate in \$order."
+                exit 1
+              fi
+            done
+            visited="${visited} ${crate}"
+          done
+
+          # And prove nothing was overlooked. A `war3-*` library that is missing
+          # from `$order` is never published, and the omission stays invisible
+          # until something downstream asks for a version that is not there --
+          # which is exactly how `war3-game` went unpublished while the binary
+          # that needs it shipped. `war3-cli` is the one deliberate exception.
+          for pkg in $(jq -r '.packages[].name | select(startswith("war3-"))' /tmp/meta.json); do
+            [ "$pkg" = "war3-cli" ] && continue
+            case " $order " in
+              *" $pkg "*) ;;
+              *)
+                echo "::error::$pkg is a library in this workspace but is not in \$order"
+                echo "Add it to \$order, or exclude it here on purpose."
+                exit 1
+                ;;
+            esac
+          done
 
           # Publishing is attempted directly rather than gated behind a
           # "is it already there?" probe, because every such probe available
